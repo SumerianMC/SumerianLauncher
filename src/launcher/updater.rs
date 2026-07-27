@@ -34,11 +34,12 @@ pub async fn check_for_update(http: &reqwest::Client) -> Result<Option<(String, 
         return Ok(None);
     }
 
+    let asset_name = platform_asset_name();
     let asset = release
         .assets
         .into_iter()
-        .find(|a| a.name.ends_with(".exe") || a.name == "sumerian")
-        .ok_or_else(|| anyhow::anyhow!("No binary asset found in release {}", release.tag_name))?;
+        .find(|a| a.name == asset_name)
+        .ok_or_else(|| anyhow::anyhow!("No binary asset '{}' found in release {}", asset_name, release.tag_name))?;
 
     Ok(Some((release.tag_name, asset.browser_download_url)))
 }
@@ -72,4 +73,14 @@ pub async fn apply_update(http: &reqwest::Client, url: &str) -> Result<PathBuf> 
 
 pub fn current_version() -> &'static str {
     CURRENT_VERSION
+}
+
+fn platform_asset_name() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "sumerian.exe"
+    } else if cfg!(target_os = "macos") {
+        "sumerian-macos"
+    } else {
+        "sumerian"
+    }
 }
