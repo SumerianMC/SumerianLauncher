@@ -1,0 +1,9 @@
+{
+  "name": "Cinematic",
+  "shadow_quality": 4,
+  "water_reflections": true,
+  "bloom": true,
+  "ambient_occlusion": true,
+  "antialiasing": "TAA",
+  "render_distance_boost": 4
+}

@@ -1,0 +1,9 @@
+{
+  "name": "Performance",
+  "shadow_quality": 0,
+  "water_reflections": false,
+  "bloom": false,
+  "ambient_occlusion": false,
+  "antialiasing": "None",
+  "render_distance_boost": 0
+}

@@ -1,0 +1,9 @@
+{
+  "name": "Realistic",
+  "shadow_quality": 3,
+  "water_reflections": true,
+  "bloom": true,
+  "ambient_occlusion": true,
+  "antialiasing": "MSAA",
+  "render_distance_boost": 2
+}
