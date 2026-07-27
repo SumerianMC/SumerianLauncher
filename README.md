@@ -8,17 +8,20 @@
 - **Microsoft Authentication** — Full OAuth2 device-code flow (Microsoft → Xbox Live → Minecraft Services). Supports **multiple Microsoft accounts** simultaneously, per-account token storage, and automatic token refresh on launch.
 - **Local Profiles** — Offline/local accounts with UUID generation, rename, and remove.
 - **Instance Manager** — Isolated game directories per instance, each with its own `mods/`, `saves/`, `resourcepacks/`, `shaderpacks/`, and `config/`.
+- **Instance Profiles** — Per-instance overrides for optimization profile, Java binary, resolution, and custom JVM args stored as `instance_profile.json` inside each instance directory.
 - **Backup Manager** — Zip and restore the `saves/` directory of any instance with timestamped backups.
 - **Mod Manager** — Search Modrinth by query + game version, browse results, pick a version, and download directly into any instance's `mods/` folder. List and remove installed mods.
+- **Mod Loader Installer** — Install Fabric (via meta.fabricmc.net) or Forge (via official installer jar) directly from the launcher without leaving the CLI.
 - **Launch Presets** — Save named launch configurations with version, optimization profile, texture pack, shader preset, resolution, server quick-join, custom JVM args, and instance binding. Full create/edit/delete wizard.
 - **Texture Injection** — Import resource packs (zip or folder) and inject them into `resourcepacks/`.
 - **Shader Presets** — Four built-in presets (Vanilla Plus, Performance, Cinematic, Realistic) injected as OptiFine/Iris shaderpacks.
-- **Optimization Profiles** — Four JVM profiles (Performance, Balanced, Quality, Potato) with tuned G1GC flags.
+- **Optimization Profiles** — Five JVM profiles (Auto, Performance, Balanced, Quality, Potato). Auto detects system RAM and sets heap to 50% capped at 8 GB.
 - **Era Compatibility** — Detects Classic/Alpha/Beta/Release/Snapshot and selects the correct Java version automatically. Filters JVM flags that are invalid for older JVMs (e.g. `--sun-misc-unsafe-memory-access` only on Java 23+).
 - **Java Version Mismatch Warning** — Detects the actual Java binary that will be used and warns visibly before launch if it doesn't match the version required by the manifest.
 - **Asset Verification** — SHA1-checks existing asset objects before launch; re-downloads corrupt or missing files. Concurrent downloads capped at 32.
 - **Launch History** — Records every launch (version, account, start time, duration, exit code). View newest-first with color-coded exit status.
-- **Crash Log Viewer** — On non-zero exit, automatically finds and prints the newest crash report (first 60 lines).
+- **Crash Log Parser** — On non-zero exit, finds the newest crash report, extracts description/exception/suspected mods, and diagnoses 9 known crash types with fix suggestions.
+- **Auto-Updater** — Checks GitHub Releases on startup and offers to atomically replace the running binary with the latest version.
 - **News Feed** — Fetches and displays Mojang's latest Java patch notes from the launcher content API.
 
 ## Requirements
@@ -45,6 +48,7 @@ cargo run --release
 
 ```
   Install Version
+  Install Mod Loader
   Launch Game
   Launch Preset
   Manage Presets
@@ -80,18 +84,21 @@ Sumerian/
     │   ├── version.rs             # Classpath + JVM arg builder
     │   ├── auth.rs                # Microsoft OAuth2 + local profiles + multi-account
     │   ├── presets.rs             # LaunchPreset (version/profile/tex/shader/res/server/jvm/instance)
-    │   ├── instances.rs           # Isolated instance directories
+    │   ├── instances.rs           # Isolated instance directories + per-instance profiles
     │   ├── backup.rs              # Zip saves/ + restore
     │   ├── mods.rs                # Modrinth search, download, list, remove
     │   ├── history.rs             # Launch records (last 100)
-    │   └── news.rs                # Mojang patch notes feed
+    │   ├── news.rs                # Mojang patch notes feed
+    │   ├── crash.rs               # Crash report parser + 9-pattern diagnostics
+    │   ├── updater.rs             # GitHub Releases auto-updater
+    │   └── loader.rs              # Fabric + Forge mod loader installer
     ├── renderer/
     │   ├── mod.rs
     │   ├── textures.rs            # Resource pack import + injection
     │   ├── shaders.rs             # Shader preset loading + injection
     │   └── pipeline.rs            # Coordinates texture + shader application
     ├── optimizer/
-    │   └── mod.rs                 # JVM optimization profiles
+    │   └── mod.rs                 # JVM optimization profiles + auto-tuner
     └── client/
         ├── mod.rs
         └── injection.rs           # Era detection, Java discovery, process launcher
@@ -119,7 +126,8 @@ SumerianClient/
 │       ├── saves/
 │       ├── resourcepacks/
 │       ├── shaderpacks/
-│       └── config/
+│       ├── config/
+│       └── instance_profile.json
 ├── accounts/
 │   └── <uuid>.json                # One file per Microsoft account
 ├── backups/
@@ -148,12 +156,13 @@ Requires OptiFine or Iris installed in the game version.
 
 ## Optimization Profiles
 
-| Profile     | Max Heap | GC         | Use Case        |
-|-------------|----------|------------|-----------------|
-| Performance | 4 GB     | G1GC tuned | High-end PCs    |
-| Balanced    | 2 GB     | G1GC       | Most systems    |
-| Quality     | 6 GB     | G1GC large | High-res/modded |
-| Potato      | 512 MB   | SerialGC   | Low-end PCs     |
+| Profile     | Max Heap        | GC         | Use Case        |
+|-------------|-----------------|------------|-----------------|
+| Auto        | 50% RAM (≤8 GB) | G1GC tuned | Recommended     |
+| Performance | 4 GB            | G1GC tuned | High-end PCs    |
+| Balanced    | 2 GB            | G1GC       | Most systems    |
+| Quality     | 6 GB            | G1GC large | High-res/modded |
+| Potato      | 512 MB          | SerialGC   | Low-end PCs     |
 
 ## Authentication
 
@@ -177,9 +186,34 @@ Sumerian automatically selects the correct Java version based on `javaVersion.ma
 
 Discovery checks `JAVA8_HOME` / `JAVA21_HOME` / `JAVA25_HOME` env vars first, then well-known install paths, then falls back to `java` on `PATH`. A visible warning is shown before launch if the found binary doesn't match the required version.
 
+## Mod Loader Installation
+
+Fabric and Forge can be installed directly from the "Install Mod Loader" menu:
+
+- **Fabric** — fetches available loader versions from meta.fabricmc.net, writes an inheriting version JSON, and downloads loader libraries into `game/libraries/`.
+- **Forge** — downloads the official Forge installer jar and runs it headlessly with `--installClient`.
+
+After installation, select the new version (e.g. `fabric-loader-0.16.x-1.21.x`) when launching or creating a preset.
+
+## Crash Diagnostics
+
+When a game session exits with a non-zero code, Sumerian automatically parses the newest crash report and diagnoses the cause:
+
+| Pattern              | Suggested Fix                              |
+|----------------------|--------------------------------------------|
+| OutOfMemoryError     | Increase heap / switch to Quality profile  |
+| StackOverflowError   | Check for recursive mod code               |
+| ClassNotFoundException | Missing mod dependency or wrong loader   |
+| UnsupportedClassVersion | Java version too old for this MC build  |
+| OpenGL / LWJGL error | Update GPU drivers                         |
+| Mixin error          | Mod incompatibility — remove suspect mod   |
+| NullPointerException | Likely mod bug — check suspected mods      |
+| Display creation     | No display / headless environment          |
+| Network error        | Check internet connection                  |
+
 ## Known Limitations
 
-- **Shader rendering** requires OptiFine or Iris installed in the game version. Sumerian injects the preset files; actual GLSL rendering is handled by those mods.
+- **Shader rendering** requires OptiFine or Iris — Sumerian injects preset files but does not bundle GLSL shaders.
+- **Forge headless install** may fail on some Forge versions that require GUI interaction.
 - **Very old versions** (Classic, early Alpha) may not have full asset downloads available from Mojang's CDN.
 - **Offline mode** is not supported — a valid Microsoft account or local profile is required.
-- **Mod loader** (Fabric/Forge) installation is not handled — install the loader manually into the version's JAR before using the mod manager.
