@@ -48,7 +48,7 @@ jobs:
           mkdir -p deb/DEBIAN
           cat <<EOF > deb/DEBIAN/control
           Package: sumerian
-          Version: ${{ github.ref_name }}
+          Version: ${GITHUB_REF_NAME#v}
           Architecture: amd64
           Maintainer: Sumerian Client
           Description: A Rust Minecraft launcher
