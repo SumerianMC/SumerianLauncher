@@ -6,45 +6,105 @@ on:
       - "v*"
 
 jobs:
-  build:
+  build-windows:
+    runs-on: windows-latest
     permissions:
       contents: write
-    strategy:
-      matrix:
-        include:
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            artifact: sumerian.exe
-            binary: target/x86_64-pc-windows-msvc/release/sumerian.exe
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            artifact: sumerian-linux
-            binary: target/x86_64-unknown-linux-gnu/release/sumerian
-          - os: macos-latest
-            target: x86_64-apple-darwin
-            artifact: sumerian-macos
-            binary: target/x86_64-apple-darwin/release/sumerian
-
-    runs-on: ${{ matrix.os }}
-
     steps:
       - uses: actions/checkout@v4
-
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
-
+          targets: x86_64-pc-windows-msvc
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --target x86_64-pc-windows-msvc
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: target/x86_64-pc-windows-msvc/release/sumerian.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
 
-      - name: Rename binary (non-Windows)
-        if: matrix.os != 'windows-latest'
-        run: cp ${{ matrix.binary }} ${{ matrix.artifact }}
+  build-linux:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+      - name: Build
+        run: cargo build --release --target x86_64-unknown-linux-gnu
+
+      - name: Package tar.gz
+        run: |
+          cp target/x86_64-unknown-linux-gnu/release/sumerian sumerian
+          tar -czf sumerian-linux.tar.gz sumerian
+
+      - name: Package .deb
+        run: |
+          mkdir -p deb/usr/local/bin
+          cp sumerian deb/usr/local/bin/sumerian
+          mkdir -p deb/DEBIAN
+          cat <<EOF > deb/DEBIAN/control
+          Package: sumerian
+          Version: ${{ github.ref_name }}
+          Architecture: amd64
+          Maintainer: Sumerian Client
+          Description: A Rust Minecraft launcher
+          EOF
+          dpkg-deb --build deb sumerian-linux.deb
 
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            ${{ matrix.os == 'windows-latest' && matrix.binary || matrix.artifact }}
+            sumerian
+            sumerian-linux.tar.gz
+            sumerian-linux.deb
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+
+  build-macos:
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
+      - name: Build
+        run: cargo build --release --target x86_64-apple-darwin
+
+      - name: Package .app
+        run: |
+          mkdir -p Sumerian.app/Contents/MacOS
+          cp target/x86_64-apple-darwin/release/sumerian Sumerian.app/Contents/MacOS/sumerian
+          cat <<EOF > Sumerian.app/Contents/Info.plist
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key><string>Sumerian</string>
+            <key>CFBundleExecutable</key><string>sumerian</string>
+            <key>CFBundleIdentifier</key><string>com.sumerianmc.sumerian</string>
+            <key>CFBundleVersion</key><string>${{ github.ref_name }}</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+          </dict>
+          </plist>
+          EOF
+
+      - name: Package .dmg
+        run: |
+          cp target/x86_64-apple-darwin/release/sumerian sumerian-macos
+          hdiutil create -volname Sumerian -srcfolder Sumerian.app -ov -format UDZO sumerian-macos.dmg
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            sumerian-macos
+            sumerian-macos.dmg
         env:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
