@@ -23,8 +23,28 @@ pub fn auto_heap_mb() -> u64 {
     (system_ram_mb() / 2).min(8192)
 }
 
+/// Build fully-tuned JVM flags based on detected system RAM.
+/// Heap is set to 50 % of RAM (capped at 8192 MB); GC flags match the
+/// profile that `auto_tune()` would pick.
+pub fn auto_tune_flags() -> Vec<String> {
+    let heap_mb = auto_heap_mb();
+    let xmx = format!("-Xmx{}M", heap_mb);
+    let xms = format!("-Xms{}M", (heap_mb / 8).max(256));
+    let profile = auto_tune();
+    // Take the chosen profile's flags but replace its hardcoded -Xmx/-Xms
+    let mut flags: Vec<String> = profile
+        .jvm_flags()
+        .into_iter()
+        .filter(|f| !f.starts_with("-Xmx") && !f.starts_with("-Xms"))
+        .collect();
+    flags.insert(0, xms);
+    flags.insert(0, xmx);
+    flags
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum OptimizationProfile {
+    Auto,
     Performance,
     Balanced,
     Quality,
@@ -34,6 +54,7 @@ pub enum OptimizationProfile {
 impl fmt::Display for OptimizationProfile {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Auto => write!(f, "Auto"),
             Self::Performance => write!(f, "Performance"),
             Self::Balanced => write!(f, "Balanced"),
             Self::Quality => write!(f, "Quality"),
@@ -45,6 +66,7 @@ impl fmt::Display for OptimizationProfile {
 impl OptimizationProfile {
     pub fn all() -> Vec<Self> {
         vec![
+            Self::Auto,
             Self::Performance,
             Self::Balanced,
             Self::Quality,
@@ -54,9 +76,10 @@ impl OptimizationProfile {
 
     pub fn from_index(i: usize) -> Self {
         match i {
-            0 => Self::Performance,
-            1 => Self::Balanced,
-            2 => Self::Quality,
+            0 => Self::Auto,
+            1 => Self::Performance,
+            2 => Self::Balanced,
+            3 => Self::Quality,
             _ => Self::Potato,
         }
     }
@@ -64,6 +87,7 @@ impl OptimizationProfile {
     /// Returns JVM flags for this profile.
     pub fn jvm_flags(&self) -> Vec<String> {
         match self {
+            Self::Auto => crate::optimizer::auto_tune_flags(),
             Self::Performance => vec![
                 "-Xmx4G".into(),
                 "-Xms512M".into(),
@@ -102,6 +126,14 @@ impl OptimizationProfile {
 
     pub fn description(&self) -> &'static str {
         match self {
+            Self::Auto => {
+                let mb = crate::optimizer::auto_heap_mb();
+                let profile = crate::optimizer::auto_tune();
+                // Return a static-lifetime str isn't possible with runtime data,
+                // so we use a fixed label here; the Select prompt shows RAM detail.
+                let _ = (mb, profile);
+                "Detected RAM — heap and GC tuned automatically"
+            }
             Self::Performance => "Max FPS, 4GB RAM, G1GC tuned",
             Self::Balanced => "Good FPS, 2GB RAM, standard G1GC",
             Self::Quality => "Best visuals, 6GB RAM, large heap",
@@ -114,10 +146,11 @@ pub mod chunk {
     /// Returns the optimal render distance for a given profile.
     pub fn recommended_render_distance(profile: &super::OptimizationProfile) -> u8 {
         match profile {
+            super::OptimizationProfile::Auto        => recommended_render_distance(&super::auto_tune()),
             super::OptimizationProfile::Performance => 12,
-            super::OptimizationProfile::Balanced => 10,
-            super::OptimizationProfile::Quality => 16,
-            super::OptimizationProfile::Potato => 6,
+            super::OptimizationProfile::Balanced    => 10,
+            super::OptimizationProfile::Quality     => 16,
+            super::OptimizationProfile::Potato      => 6,
         }
     }
 }
@@ -126,10 +159,11 @@ pub mod memory {
     /// Returns max heap in MB for a given profile.
     pub fn max_heap_mb(profile: &super::OptimizationProfile) -> u32 {
         match profile {
+            super::OptimizationProfile::Auto        => super::auto_heap_mb() as u32,
             super::OptimizationProfile::Performance => 4096,
-            super::OptimizationProfile::Balanced => 2048,
-            super::OptimizationProfile::Quality => 6144,
-            super::OptimizationProfile::Potato => 512,
+            super::OptimizationProfile::Balanced    => 2048,
+            super::OptimizationProfile::Quality     => 6144,
+            super::OptimizationProfile::Potato      => 512,
         }
     }
 }

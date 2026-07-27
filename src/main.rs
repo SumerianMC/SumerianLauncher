@@ -14,11 +14,13 @@ use launcher::{
     backup::BackupManager,
     downloader::Downloader,
     history::{HistoryManager, LaunchRecord},
-    instances::InstanceManager,
+    instances::{InstanceManager, InstanceProfile},
+    loader,
     manifest::VersionManifest,
     mods::ModManager,
     news,
     presets::{LaunchPreset, PresetManager},
+    updater,
     version::VersionManager,
 };
 use optimizer::OptimizationProfile;
@@ -93,6 +95,43 @@ async fn main() -> Result<()> {
     print_banner();
 
     let base = base_dir();
+
+    // ── Auto-update check ────────────────────────────────────────────────────
+    {
+        let check_http = reqwest::Client::builder()
+            .user_agent("SumerianClient")
+            .build()
+            .unwrap();
+        match updater::check_for_update(&check_http).await {
+            Ok(Some((tag, url))) => {
+                println!(
+                    "  {} Update available: {} → {}",
+                    style("↑").green().bold(),
+                    style(updater::current_version()).dim(),
+                    style(&tag).green().bold()
+                );
+                let do_update = Confirm::with_theme(&theme())
+                    .with_prompt("Download and install update now?")
+                    .default(true)
+                    .interact()
+                    .unwrap_or(false);
+                if do_update {
+                    println!("  {} Downloading {}...", style("→").cyan(), tag);
+                    match updater::apply_update(&check_http, &url).await {
+                        Ok(path) => {
+                            println!("  {} Updated! Restart Sumerian to use the new version.", style("✓").green());
+                            println!("  Installed to: {}", path.display());
+                            return Ok(());
+                        }
+                        Err(e) => println!("  {} Update failed: {}", style("✗").red(), e),
+                    }
+                }
+                println!();
+            }
+            Ok(None) => {} // already up-to-date, silent
+            Err(_) => {}   // no network / API down, silent
+        }
+    }
     let game = game_dir();
     let config = config_dir();
 
@@ -122,6 +161,7 @@ async fn main() -> Result<()> {
             .with_prompt("Main Menu")
             .items(&[
                 "Install Version",
+                "Install Mod Loader",
                 "Launch Game",
                 "Launch Preset",
                 "Manage Presets",
@@ -140,18 +180,19 @@ async fn main() -> Result<()> {
 
         match choice {
             0 => install_version(&http, &downloader, &version_mgr, &game).await?,
-            1 => launch_game(&downloader, &auth, &profiles, &version_mgr, &texture_mgr, &shader_mgr, &history_mgr, &instance_mgr, &game).await?,
-            2 => launch_preset(&downloader, &auth, &profiles, &preset_mgr, &version_mgr, &texture_mgr, &shader_mgr, &history_mgr, &instance_mgr, &game).await?,
-            3 => manage_presets(&preset_mgr, &version_mgr, &texture_mgr, &shader_mgr).await?,
-            4 => manage_accounts(&auth, &profiles, &base).await?,
-            5 => manage_textures(&texture_mgr, &game).await?,
-            6 => manage_shaders(&shader_mgr, &game).await?,
-            7 => manage_instances(&instance_mgr, &version_mgr, &backup_mgr, &game).await?,
-            8 => manage_mods(&mod_mgr, &instance_mgr, &version_mgr, &game).await?,
-            9 => list_installed(&version_mgr).await?,
-            10 => view_launch_history(&history_mgr).await?,
-            11 => view_news(&http).await?,
-            12 => {
+            1 => install_mod_loader(&http, &version_mgr, &game).await?,
+            2 => launch_game(&downloader, &auth, &profiles, &version_mgr, &texture_mgr, &shader_mgr, &history_mgr, &instance_mgr, &game).await?,
+            3 => launch_preset(&downloader, &auth, &profiles, &preset_mgr, &version_mgr, &texture_mgr, &shader_mgr, &history_mgr, &instance_mgr, &game).await?,
+            4 => manage_presets(&preset_mgr, &version_mgr, &texture_mgr, &shader_mgr).await?,
+            5 => manage_accounts(&auth, &profiles, &base).await?,
+            6 => manage_textures(&texture_mgr, &game).await?,
+            7 => manage_shaders(&shader_mgr, &game).await?,
+            8 => manage_instances(&instance_mgr, &version_mgr, &backup_mgr, &game).await?,
+            9 => manage_mods(&mod_mgr, &instance_mgr, &version_mgr, &game).await?,
+            10 => list_installed(&version_mgr).await?,
+            11 => view_launch_history(&history_mgr).await?,
+            12 => view_news(&http).await?,
+            13 => {
                 println!("  Goodbye.");
                 break;
             }
@@ -266,8 +307,8 @@ async fn launch_game(
 
     // Instance selection
     let instances = instance_mgr.load_all().await?;
-    let game_dir_override = if instances.is_empty() {
-        None
+    let (game_dir_override, inst_profile) = if instances.is_empty() {
+        (None, InstanceProfile::default())
     } else {
         let mut inst_labels: Vec<String> = vec!["Default (shared game dir)".into()];
         inst_labels.extend(instances.iter().map(|i| format!("{} [{}]", i.name, i.version_id)));
@@ -276,7 +317,13 @@ async fn launch_game(
             .items(&inst_labels)
             .default(0)
             .interact()?;
-        if i_idx == 0 { None } else { Some(instance_mgr.instance_dir(&instances[i_idx - 1].name)) }
+        if i_idx == 0 {
+            (None, InstanceProfile::default())
+        } else {
+            let inst = &instances[i_idx - 1];
+            let profile = instance_mgr.load_profile(&inst.name).await;
+            (Some(instance_mgr.instance_dir(&inst.name)), profile)
+        }
     };
 
     // Ensure assets are complete before launching
@@ -285,19 +332,38 @@ async fn launch_game(
         downloader.download_assets(asset_index).await?;
     }
 
-    // Optimization profile
+    // Optimization profile — instance profile overrides global picker
     let opt_profiles = OptimizationProfile::all();
+    let ram_mb = optimizer::auto_heap_mb();
     let profile_labels: Vec<String> = opt_profiles
         .iter()
-        .map(|p| format!("{} — {}", p, p.description()))
+        .map(|p| {
+            if *p == OptimizationProfile::Auto {
+                format!("Auto — {}MB heap detected ({})", ram_mb, optimizer::auto_tune())
+            } else {
+                format!("{} — {}", p, p.description())
+            }
+        })
         .collect();
 
-    let profile_idx = Select::with_theme(&theme())
-        .with_prompt("Optimization profile")
-        .items(&profile_labels)
-        .default(1)
-        .interact()?;
-    let profile = OptimizationProfile::from_index(profile_idx);
+    let profile = if let Some(ref p) = inst_profile.optimization {
+        println!("  {} Using instance optimization profile: {}", style("ℹ").cyan(), p);
+        p.clone()
+    } else {
+        let profile_idx = Select::with_theme(&theme())
+            .with_prompt("Optimization profile")
+            .items(&profile_labels)
+            .default(1)
+            .interact()?;
+        OptimizationProfile::from_index(profile_idx)
+    };
+
+    let (launch_width, launch_height) = if inst_profile.width.is_some() {
+        (inst_profile.width, inst_profile.height)
+    } else {
+        (None, None)
+    };
+    let inst_jvm_args = inst_profile.custom_jvm_args.clone();
 
     // Texture pack selection
     let packs = texture_mgr.list_packs().await?;
@@ -367,12 +433,12 @@ async fn launch_game(
     let opts = LaunchOptions {
         session: &session,
         profile: &profile,
-        custom_jvm_args: &[],
-        width: None,
-        height: None,
+        custom_jvm_args: &inst_jvm_args,
+        width: launch_width,
+        height: launch_height,
         server: None,
         port: None,
-        game_dir_override: game_dir_override,
+        game_dir_override,
     };
     let mut child = launcher.launch(&meta, &opts, version_mgr)?;
 
@@ -1001,9 +1067,16 @@ async fn build_preset_interactive(
 
     // ── Optimization profile ──────────────────────────────────────────────────
     let opt_list = OptimizationProfile::all();
+    let ram_mb = optimizer::auto_heap_mb();
     let opt_labels: Vec<String> = opt_list
         .iter()
-        .map(|p| format!("{} — {}", p, p.description()))
+        .map(|p| {
+            if *p == OptimizationProfile::Auto {
+                format!("Auto — {}MB heap detected ({})", ram_mb, optimizer::auto_tune())
+            } else {
+                format!("{} — {}", p, p.description())
+            }
+        })
         .collect();
     let default_o = existing
         .and_then(|p| opt_list.iter().position(|o| o == &p.optimization))
@@ -1181,35 +1254,39 @@ async fn view_launch_history(history_mgr: &HistoryManager) -> Result<()> {
 // ── Crash Log Viewer ──────────────────────────────────────────────────────────
 
 fn show_latest_crash_report(game_dir: &PathBuf) {
-    let crash_dir = game_dir.join("crash-reports");
-    let Ok(entries) = std::fs::read_dir(&crash_dir) else { return };
+    use launcher::crash;
 
-    // Find the most recently modified crash report
-    let latest = entries
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.path().extension().and_then(|x| x.to_str()) == Some("txt")
-        })
-        .max_by_key(|e| {
-            e.metadata().and_then(|m| m.modified()).ok()
-        });
-
-    let Some(entry) = latest else { return };
-
-    let Ok(content) = std::fs::read_to_string(entry.path()) else { return };
+    let Some(path) = crash::find_latest(game_dir) else { return };
+    let Some(report) = crash::parse(&path) else {
+        println!("  {} Could not parse crash report.", style("⚠").red());
+        return;
+    };
 
     println!();
-    println!("  {} Crash report: {}", style("⚠").red(), entry.file_name().to_string_lossy());
+    println!("  {} Crash detected: {}", style("⚠").red().bold(), style(&report.description).red());
     println!("  {}", style("─".repeat(60)).dim());
 
-    // Print up to the first 60 lines — enough to see description + stack top
-    for line in content.lines().take(60) {
-        println!("  {}", line);
+    if let Some(ref ex) = report.exception {
+        println!("  {} {}", style("Exception:").yellow(), style(ex).red());
     }
 
-    if content.lines().count() > 60 {
-        println!("  {} ... (truncated, full report at {})", style("…").dim(), entry.path().display());
+    if !report.suspected_mods.is_empty() {
+        println!();
+        println!("  {} Suspected mods / classes in stack trace:", style("◆").yellow());
+        for m in report.suspected_mods.iter().take(5) {
+            println!("    {} {}", style("•").dim(), style(m).yellow());
+        }
     }
+
+    println!();
+    println!("  {} Diagnos{}:", style("◆").cyan(), if report.diagnoses.len() == 1 { "is" } else { "es" });
+    for d in &report.diagnoses {
+        println!("    {} {}", style("•").red(), style(d.cause).red().bold());
+        println!("      {} {}", style("→").cyan(), d.fix);
+    }
+
+    println!();
+    println!("  Full report: {}", style(report.path.display()).dim());
     println!();
 }
 
@@ -1233,7 +1310,7 @@ async fn manage_instances(
 
         let choice = Select::with_theme(&theme())
             .with_prompt("Instance Manager")
-            .items(&["Create instance", "Delete instance", "Backup instance", "Restore backup", "Back"])
+            .items(&["Create instance", "Delete instance", "Edit profile", "Backup instance", "Restore backup", "Back"])
             .default(0)
             .interact()?;
 
@@ -1281,6 +1358,20 @@ async fn manage_instances(
                 }
             }
             2 => {
+                if instances.is_empty() { println!("  No instances to edit."); continue; }
+                let labels: Vec<&str> = instances.iter().map(|i| i.name.as_str()).collect();
+                let i = Select::with_theme(&theme())
+                    .with_prompt("Select instance")
+                    .items(&labels).default(0).interact()?;
+                let name = &instances[i].name;
+                let current = instance_mgr.load_profile(name).await;
+                let updated = edit_instance_profile(name, current).await?;
+                match instance_mgr.save_profile(name, &updated).await {
+                    Ok(_)  => println!("  {} Profile saved for '{}'.", style("✓").green(), name),
+                    Err(e) => println!("  {} {}", style("✗").red(), e),
+                }
+            }
+            3 => {
                 if instances.is_empty() { println!("  No instances to back up."); continue; }
                 let labels: Vec<&str> = instances.iter().map(|i| i.name.as_str()).collect();
                 let i = Select::with_theme(&theme())
@@ -1293,7 +1384,7 @@ async fn manage_instances(
                     Err(e)   => println!("  {} {}", style("✗").red(), e),
                 }
             }
-            3 => {
+            4 => {
                 if instances.is_empty() { println!("  No instances available."); continue; }
                 let labels: Vec<&str> = instances.iter().map(|i| i.name.as_str()).collect();
                 let i = Select::with_theme(&theme())
@@ -1409,6 +1500,155 @@ fn check_java_version(meta: &launcher::manifest::VersionMeta) {
             println!();
         }
     }
+}
+
+// ── Instance Profile Editor ─────────────────────────────────────────────────────
+
+async fn edit_instance_profile(
+    instance_name: &str,
+    current: InstanceProfile,
+) -> Result<InstanceProfile> {
+    println!();
+    println!("  {} Instance profile: {}", style("◆").cyan(), style(instance_name).cyan().bold());
+    println!("  Leave fields blank / unchanged to keep current values.");
+    println!();
+
+    // ── Optimization profile ─────────────────────────────────────────────────────
+    let opt_list = OptimizationProfile::all();
+    let ram_mb = optimizer::auto_heap_mb();
+    let mut opt_labels: Vec<String> = vec!["Inherit (use global setting)".into()];
+    opt_labels.extend(opt_list.iter().map(|p| {
+        if *p == OptimizationProfile::Auto {
+            format!("Auto — {}MB heap detected ({})", ram_mb, optimizer::auto_tune())
+        } else {
+            format!("{} — {}", p, p.description())
+        }
+    }));
+    let default_o = current.optimization.as_ref()
+        .and_then(|o| opt_list.iter().position(|p| p == o).map(|i| i + 1))
+        .unwrap_or(0);
+    let o_idx = Select::with_theme(&theme())
+        .with_prompt("Optimization profile")
+        .items(&opt_labels)
+        .default(default_o)
+        .interact()?;
+    let optimization = if o_idx == 0 { None } else { Some(OptimizationProfile::from_index(o_idx - 1)) };
+
+    // ── Java override ───────────────────────────────────────────────────────────────
+    let java_raw: String = Input::with_theme(&theme())
+        .with_prompt("Java binary path override (leave blank to auto-detect)")
+        .with_initial_text(current.java_path.as_deref().unwrap_or(""))
+        .allow_empty(true)
+        .interact_text()?;
+    let java_path = if java_raw.trim().is_empty() { None } else { Some(java_raw.trim().to_string()) };
+
+    // ── Resolution ──────────────────────────────────────────────────────────────────
+    let use_res = Confirm::with_theme(&theme())
+        .with_prompt("Set custom resolution for this instance?")
+        .default(current.width.is_some())
+        .interact()?;
+    let (width, height) = if use_res {
+        let w: String = Input::with_theme(&theme())
+            .with_prompt("Width")
+            .with_initial_text(current.width.map(|v| v.to_string()).unwrap_or_else(|| "1280".into()))
+            .validate_with(|s: &String| s.trim().parse::<u32>().map(|_| ()).map_err(|_| "Must be a number"))
+            .interact_text()?;
+        let h: String = Input::with_theme(&theme())
+            .with_prompt("Height")
+            .with_initial_text(current.height.map(|v| v.to_string()).unwrap_or_else(|| "720".into()))
+            .validate_with(|s: &String| s.trim().parse::<u32>().map(|_| ()).map_err(|_| "Must be a number"))
+            .interact_text()?;
+        (Some(w.trim().parse::<u32>().unwrap()), Some(h.trim().parse::<u32>().unwrap()))
+    } else {
+        (None, None)
+    };
+
+    // ── Custom JVM args ───────────────────────────────────────────────────────────────
+    let jvm_raw: String = Input::with_theme(&theme())
+        .with_prompt("Extra JVM args (space-separated, leave blank for none)")
+        .with_initial_text(&current.custom_jvm_args.join(" "))
+        .allow_empty(true)
+        .interact_text()?;
+    let custom_jvm_args: Vec<String> = jvm_raw.split_whitespace().map(|s| s.to_string()).collect();
+
+    Ok(InstanceProfile { optimization, java_path, width, height, custom_jvm_args })
+}
+
+// ── Mod Loader Installer ─────────────────────────────────────────────────────
+
+async fn install_mod_loader(
+    http: &reqwest::Client,
+    version_mgr: &VersionManager,
+    game_dir: &PathBuf,
+) -> Result<()> {
+    let installed = version_mgr.list_installed().await?;
+    if installed.is_empty() {
+        println!("  No versions installed. Install a Minecraft version first.");
+        return Ok(());
+    }
+
+    let version_labels: Vec<String> = installed
+        .iter()
+        .map(|v| format!("{} [{}]", v.id, v.version_type))
+        .collect();
+    let v_idx = Select::with_theme(&theme())
+        .with_prompt("Minecraft version")
+        .items(&version_labels)
+        .default(0)
+        .interact()?;
+    let mc_version = &installed[v_idx].id;
+
+    let loader_choice = Select::with_theme(&theme())
+        .with_prompt("Mod loader")
+        .items(&["Fabric", "Forge"])
+        .default(0)
+        .interact()?;
+
+    match loader_choice {
+        0 => {
+            println!("  {} Fetching Fabric loader versions...", style("→").cyan());
+            let versions = match loader::fabric_loader_versions(http, mc_version).await {
+                Ok(v) => v,
+                Err(e) => { println!("  {} {}", style("✗").red(), e); return Ok(()); }
+            };
+            if versions.is_empty() {
+                println!("  No Fabric loader versions found for {}.", mc_version);
+                return Ok(());
+            }
+            let l_idx = Select::with_theme(&theme())
+                .with_prompt("Loader version")
+                .items(&versions)
+                .default(0)
+                .interact()?;
+            println!("  {} Installing Fabric {}...", style("→").cyan(), versions[l_idx]);
+            match loader::install_fabric(http, game_dir, mc_version, &versions[l_idx]).await {
+                Ok(id) => println!("  {} Installed as version '{}'. Select it in Launch Game.", style("✓").green(), id),
+                Err(e) => println!("  {} {}", style("✗").red(), e),
+            }
+        }
+        _ => {
+            println!("  {} Fetching Forge versions...", style("→").cyan());
+            let versions = match loader::forge_versions(http, mc_version).await {
+                Ok(v) => v,
+                Err(e) => { println!("  {} {}", style("✗").red(), e); return Ok(()); }
+            };
+            if versions.is_empty() {
+                println!("  No Forge versions found for {}.", mc_version);
+                return Ok(());
+            }
+            let f_idx = Select::with_theme(&theme())
+                .with_prompt("Forge version")
+                .items(&versions)
+                .default(0)
+                .interact()?;
+            println!("  {} Running Forge installer (this may take a minute)...", style("→").cyan());
+            match loader::install_forge(http, game_dir, &versions[f_idx]).await {
+                Ok(id) => println!("  {} Installed as version '{}'. Select it in Launch Game.", style("✓").green(), id),
+                Err(e) => println!("  {} {}", style("✗").red(), e),
+            }
+        }
+    }
+    Ok(())
 }
 
 // ── Mod Manager ───────────────────────────────────────────────────────────────

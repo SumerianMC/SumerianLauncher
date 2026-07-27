@@ -3,6 +3,23 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tokio::fs;
 
+use crate::optimizer::OptimizationProfile;
+
+/// Per-instance launch overrides — all fields optional so unset = inherit global.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct InstanceProfile {
+    #[serde(default)]
+    pub optimization: Option<OptimizationProfile>,
+    #[serde(default)]
+    pub java_path: Option<String>,
+    #[serde(default)]
+    pub width: Option<u32>,
+    #[serde(default)]
+    pub height: Option<u32>,
+    #[serde(default)]
+    pub custom_jvm_args: Vec<String>,
+}
+
 /// A named instance is an isolated copy of a version's game directory.
 /// Each instance has its own mods/, saves/, resourcepacks/, shaderpacks/.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,5 +92,24 @@ impl InstanceManager {
     /// Returns the game directory for an instance (passed as --gameDir to Minecraft).
     pub fn instance_dir(&self, name: &str) -> PathBuf {
         self.instances_dir.join(name)
+    }
+
+    /// Path to the per-instance profile JSON.
+    fn profile_path(&self, name: &str) -> PathBuf {
+        self.instance_dir(name).join("instance_profile.json")
+    }
+
+    pub async fn load_profile(&self, name: &str) -> InstanceProfile {
+        let path = self.profile_path(name);
+        match fs::read_to_string(&path).await {
+            Ok(raw) => serde_json::from_str(&raw).unwrap_or_default(),
+            Err(_) => InstanceProfile::default(),
+        }
+    }
+
+    pub async fn save_profile(&self, name: &str, profile: &InstanceProfile) -> Result<()> {
+        let path = self.profile_path(name);
+        fs::write(path, serde_json::to_string_pretty(profile)?).await?;
+        Ok(())
     }
 }

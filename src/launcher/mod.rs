@@ -1,10 +1,13 @@
 pub mod auth;
 pub mod backup;
+pub mod crash;
 pub mod downloader;
 pub mod history;
 pub mod instances;
 pub mod manifest;
+pub mod loader;
 pub mod mods;
 pub mod news;
 pub mod presets;
+pub mod updater;
 pub mod version;
