@@ -7,23 +7,44 @@ on:
 
 jobs:
   build:
-    runs-on: windows-latest
     permissions:
       contents: write
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: sumerian.exe
+            binary: target/x86_64-pc-windows-msvc/release/sumerian.exe
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: sumerian-linux
+            binary: target/x86_64-unknown-linux-gnu/release/sumerian
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact: sumerian-macos
+            binary: target/x86_64-apple-darwin/release/sumerian
+
+    runs-on: ${{ matrix.os }}
 
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-pc-windows-msvc
+          targets: ${{ matrix.target }}
 
       - name: Build
-        run: cargo build --release --target x86_64-pc-windows-msvc
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Rename binary (non-Windows)
+        if: matrix.os != 'windows-latest'
+        run: cp ${{ matrix.binary }} ${{ matrix.artifact }}
 
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
-          files: target/x86_64-pc-windows-msvc/release/sumerian.exe
+          files: |
+            ${{ matrix.os == 'windows-latest' && matrix.binary || matrix.artifact }}
         env:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
