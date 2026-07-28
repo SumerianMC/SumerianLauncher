@@ -30,7 +30,10 @@ pub async fn check_for_update(http: &reqwest::Client) -> Result<Option<(String, 
         .await?;
 
     let latest = release.tag_name.trim_start_matches('v');
-    if latest == CURRENT_VERSION {
+    // Normalize: cargo versions are always X.Y.Z, tags may be X.Y — pad to match
+    let latest_normalized = normalize_version(latest);
+    let current_normalized = normalize_version(CURRENT_VERSION);
+    if latest_normalized == current_normalized {
         return Ok(None);
     }
 
@@ -73,6 +76,16 @@ pub async fn apply_update(http: &reqwest::Client, url: &str) -> Result<PathBuf> 
 
 pub fn current_version() -> &'static str {
     CURRENT_VERSION
+}
+
+/// Pads a version string to always have 3 parts: "0.40" → "0.40.0"
+fn normalize_version(v: &str) -> String {
+    let parts: Vec<&str> = v.split('.').collect();
+    match parts.len() {
+        1 => format!("{}.0.0", parts[0]),
+        2 => format!("{}.{}.0", parts[0], parts[1]),
+        _ => v.to_string(),
+    }
 }
 
 fn platform_asset_name() -> &'static str {
