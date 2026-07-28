@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod backup;
 pub mod crash;
+pub mod discord;
 pub mod downloader;
 pub mod history;
 pub mod instances;

@@ -22,6 +22,7 @@ use launcher::{
     presets::{LaunchPreset, PresetManager},
     updater,
     version::VersionManager,
+    discord::DiscordPresence,
 };
 use optimizer::OptimizationProfile;
 use renderer::{
@@ -447,9 +448,13 @@ async fn launch_game(
         style("✓").green(),
         child.id()
     );
+    let mut discord = DiscordPresence::new();
+    discord.connect();
+    discord.set_playing(&meta.id, &session.username);
     let started_at = chrono::Utc::now();
     let start = std::time::Instant::now();
     let status = child.wait()?;
+    discord.clear();
     let duration_secs = start.elapsed().as_secs();
     let exit_code = status.code();
 
@@ -914,9 +919,13 @@ async fn launch_preset(
         style("✓").green(),
         child.id()
     );
+    let mut discord = DiscordPresence::new();
+    discord.connect();
+    discord.set_playing(&meta.id, &session.username);
     let started_at = chrono::Utc::now();
     let start = std::time::Instant::now();
     let status = child.wait()?;
+    discord.clear();
     let duration_secs = start.elapsed().as_secs();
     let exit_code = status.code();
 
