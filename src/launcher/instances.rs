@@ -24,6 +24,16 @@ pub struct Instance {
     pub name: String,
     pub version_id: String,
     pub created_at: String,
+    #[serde(default)]
+    pub notes: String,
+}
+
+/// Per-instance mod enable/disable profile stored as `mod_profile.json`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ModProfile {
+    /// Filenames of mods that are disabled (renamed to .jar.disabled on disk).
+    #[serde(default)]
+    pub disabled: Vec<String>,
 }
 
 pub struct InstanceManager {
@@ -65,10 +75,42 @@ impl InstanceManager {
             name: name.to_string(),
             version_id: version_id.to_string(),
             created_at: chrono::Utc::now().to_rfc3339(),
+            notes: String::new(),
         };
         all.push(instance.clone());
         self.save_all(&all).await?;
         Ok(instance)
+    }
+
+    pub async fn set_notes(&self, name: &str, notes: &str) -> Result<()> {
+        let mut all = self.load_all().await?;
+        match all.iter_mut().find(|i| i.name.eq_ignore_ascii_case(name)) {
+            Some(i) => i.notes = notes.to_string(),
+            None => bail!("Instance '{}' not found.", name),
+        }
+        self.save_all(&all).await
+    }
+
+    pub async fn clone_instance(&self, src: &str, new_name: &str) -> Result<Instance> {
+        let mut all = self.load_all().await?;
+        if all.iter().any(|i| i.name.eq_ignore_ascii_case(new_name)) {
+            bail!("Instance '{}' already exists.", new_name);
+        }
+        let src_inst = all.iter().find(|i| i.name.eq_ignore_ascii_case(src))
+            .ok_or_else(|| anyhow::anyhow!("Instance '{}' not found.", src))?
+            .clone();
+        let src_dir = self.instance_dir(src);
+        let dst_dir = self.instance_dir(new_name);
+        copy_dir_all(&src_dir, &dst_dir).await?;
+        let new_inst = Instance {
+            name: new_name.to_string(),
+            version_id: src_inst.version_id.clone(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            notes: src_inst.notes.clone(),
+        };
+        all.push(new_inst.clone());
+        self.save_all(&all).await?;
+        Ok(new_inst)
     }
 
     pub async fn delete(&self, name: &str) -> Result<()> {
@@ -105,6 +147,48 @@ impl InstanceManager {
         let path = self.profile_path(name);
         fs::write(path, serde_json::to_string_pretty(profile)?).await?;
         Ok(())
+    }
+
+    fn mod_profile_path(&self, name: &str) -> PathBuf {
+        self.instance_dir(name).join("mod_profile.json")
+    }
+
+    pub async fn load_mod_profile(&self, name: &str) -> ModProfile {
+        match fs::read_to_string(self.mod_profile_path(name)).await {
+            Ok(raw) => serde_json::from_str(&raw).unwrap_or_default(),
+            Err(_) => ModProfile::default(),
+        }
+    }
+
+    pub async fn save_mod_profile(&self, name: &str, mp: &ModProfile) -> Result<()> {
+        fs::write(self.mod_profile_path(name), serde_json::to_string_pretty(mp)?).await?;
+        Ok(())
+    }
+
+    /// Disable a mod by renaming `name.jar` → `name.jar.disabled`.
+    pub async fn disable_mod(&self, instance: &str, filename: &str) -> Result<()> {
+        let mods_dir = self.instance_dir(instance).join("mods");
+        let src = mods_dir.join(filename);
+        let dst = mods_dir.join(format!("{}.disabled", filename));
+        if !src.exists() { bail!("Mod '{}' not found.", filename); }
+        fs::rename(src, dst).await?;
+        let mut mp = self.load_mod_profile(instance).await;
+        if !mp.disabled.contains(&filename.to_string()) {
+            mp.disabled.push(filename.to_string());
+        }
+        self.save_mod_profile(instance, &mp).await
+    }
+
+    /// Re-enable a mod by renaming `name.jar.disabled` → `name.jar`.
+    pub async fn enable_mod(&self, instance: &str, filename: &str) -> Result<()> {
+        let mods_dir = self.instance_dir(instance).join("mods");
+        let src = mods_dir.join(format!("{}.disabled", filename));
+        let dst = mods_dir.join(filename);
+        if !src.exists() { bail!("Disabled mod '{}' not found.", filename); }
+        fs::rename(src, dst).await?;
+        let mut mp = self.load_mod_profile(instance).await;
+        mp.disabled.retain(|f| f != filename);
+        self.save_mod_profile(instance, &mp).await
     }
 
     pub async fn export(&self, name: &str, dest_path: &PathBuf) -> Result<()> {
@@ -253,6 +337,21 @@ fn add_dir_to_zip(
             zip.start_file(&rel_str, opts)?;
             let bytes = std::fs::read(&path)?;
             zip.write_all(&bytes)?;
+        }
+    }
+    Ok(())
+}
+
+async fn copy_dir_all(src: &PathBuf, dst: &PathBuf) -> Result<()> {
+    fs::create_dir_all(dst).await?;
+    let mut rd = fs::read_dir(src).await?;
+    while let Some(entry) = rd.next_entry().await? {
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if src_path.is_dir() {
+            Box::pin(copy_dir_all(&src_path, &dst_path)).await?;
+        } else {
+            fs::copy(&src_path, &dst_path).await?;
         }
     }
     Ok(())

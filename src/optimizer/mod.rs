@@ -42,10 +42,11 @@ pub fn auto_tune_flags() -> Vec<String> {
     flags
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub enum OptimizationProfile {
     Auto,
     Performance,
+    #[default]
     Balanced,
     Quality,
     Potato,

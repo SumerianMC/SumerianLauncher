@@ -28,7 +28,9 @@ pub async fn try_auto_install_java(
              else if cfg!(target_os = "macos") { "mac" }
              else { "linux" };
     let arch = if cfg!(target_arch = "x86_64") { "x64" } else { "aarch64" };
-    let ext = if cfg!(target_os = "windows") { "zip" } else { "tar.gz" };
+    let ext = if cfg!(target_os = "windows") { "zip" }
+              else if cfg!(target_os = "macos") { "tar.gz" }
+              else { "tar.gz" };
 
     // Build candidate URLs: Adoptium API first, then direct fallback mirrors
     let mut urls: Vec<String> = Vec::new();
@@ -53,26 +55,34 @@ pub async fn try_auto_install_java(
     }
 
     // 2. Direct Adoptium archive fallback mirrors
-    let (win_zip, linux_tar) = match major {
+    let arch_str = if cfg!(target_arch = "x86_64") { "x64" } else { "aarch64" };
+    let (win_zip, linux_tar, mac_tar) = match major {
         8  => (
             "https://github.com/adoptium/temurin8-binaries/releases/download/jdk8u392-b08/OpenJDK8U-jdk_x64_windows_hotspot_8u392b08.zip",
             "https://github.com/adoptium/temurin8-binaries/releases/download/jdk8u392-b08/OpenJDK8U-jdk_x64_linux_hotspot_8u392b08.tar.gz",
+            "https://github.com/adoptium/temurin8-binaries/releases/download/jdk8u392-b08/OpenJDK8U-jdk_x64_mac_hotspot_8u392b08.tar.gz",
         ),
         16 => (
             "https://github.com/adoptium/temurin16-binaries/releases/download/jdk-16.0.2%2B7/OpenJDK16U-jdk_x64_windows_hotspot_16.0.2_7.zip",
             "https://github.com/adoptium/temurin16-binaries/releases/download/jdk-16.0.2%2B7/OpenJDK16U-jdk_x64_linux_hotspot_16.0.2_7.tar.gz",
+            "https://github.com/adoptium/temurin16-binaries/releases/download/jdk-16.0.2%2B7/OpenJDK16U-jdk_x64_mac_hotspot_16.0.2_7.tar.gz",
         ),
         17 => (
             "https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.9%2B9/OpenJDK17U-jdk_x64_windows_hotspot_17.0.9_9.zip",
             "https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.9%2B9/OpenJDK17U-jdk_x64_linux_hotspot_17.0.9_9.tar.gz",
+            "https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.9%2B9/OpenJDK17U-jdk_x64_mac_hotspot_17.0.9_9.tar.gz",
         ),
         21 => (
             "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.1%2B12/OpenJDK21U-jdk_x64_windows_hotspot_21.0.1_12.zip",
             "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.1%2B12/OpenJDK21U-jdk_x64_linux_hotspot_21.0.1_12.tar.gz",
+            "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.1%2B12/OpenJDK21U-jdk_aarch64_mac_hotspot_21.0.1_12.tar.gz",
         ),
-        _ => ("", ""),
+        _ => ("", "", ""),
     };
-    let fallback = if cfg!(target_os = "windows") { win_zip } else { linux_tar };
+    let _ = arch_str;
+    let fallback = if cfg!(target_os = "windows") { win_zip }
+                   else if cfg!(target_os = "macos") { mac_tar }
+                   else { linux_tar };
     if !fallback.is_empty() { urls.push(fallback.to_string()); }
 
     // Try each URL in order

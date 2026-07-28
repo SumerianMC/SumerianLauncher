@@ -5,6 +5,8 @@ use tokio::fs;
 
 const MODRINTH_SEARCH: &str = "https://api.modrinth.com/v2/search";
 const MODRINTH_VERSIONS: &str = "https://api.modrinth.com/v2/project/{id}/version";
+const MODRINTH_PROJECT: &str = "https://api.modrinth.com/v2/project/{id}";
+const MODRINTH_VERSION: &str = "https://api.modrinth.com/v2/version/{id}";
 
 #[derive(Debug, Deserialize)]
 pub struct ModrinthHit {
@@ -15,11 +17,20 @@ pub struct ModrinthHit {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct ModrinthDependency {
+    pub project_id: Option<String>,
+    pub version_id: Option<String>,
+    pub dependency_type: String,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct ModrinthVersion {
     pub id: String,
     pub name: String,
     pub game_versions: Vec<String>,
     pub files: Vec<ModrinthFile>,
+    #[serde(default)]
+    pub dependencies: Vec<ModrinthDependency>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -101,6 +112,53 @@ impl ModManager {
 
         fs::write(&dest, &bytes).await?;
         Ok(dest)
+    }
+
+    /// Resolve and download required dependencies for a version that aren't already installed.
+    pub async fn resolve_dependencies(
+        &self,
+        version: &ModrinthVersion,
+        game_version: &str,
+        mods_dir: &Path,
+        already_installed: &[String],
+    ) -> Result<Vec<PathBuf>> {
+        let mut installed = Vec::new();
+        for dep in &version.dependencies {
+            if dep.dependency_type != "required" { continue; }
+            let project_id = match &dep.project_id {
+                Some(id) => id.clone(),
+                None => continue,
+            };
+            // Fetch the project title to check if already installed
+            let project_url = MODRINTH_PROJECT.replace("{id}", &project_id);
+            let project: serde_json::Value = self.client.get(&project_url).send().await?.json().await?;
+            let slug = project["slug"].as_str().unwrap_or("").to_string();
+
+            // Skip if a jar with the slug name is already present
+            if already_installed.iter().any(|f| f.to_lowercase().contains(&slug.to_lowercase())) {
+                continue;
+            }
+
+            // If a specific version is pinned, use it; otherwise pick latest compatible
+            let dep_version: ModrinthVersion = if let Some(vid) = &dep.version_id {
+                let url = MODRINTH_VERSION.replace("{id}", vid);
+                self.client.get(&url).send().await?.json().await
+                    .context("Failed to fetch pinned dependency version")?  
+            } else {
+                let versions = self.get_versions(&project_id, game_version).await?;
+                match versions.into_iter().next() {
+                    Some(v) => v,
+                    None => continue,
+                }
+            };
+
+            println!("  → Installing dependency: {}...", dep_version.name);
+            match self.download_mod(&dep_version, mods_dir).await {
+                Ok(path) => installed.push(path),
+                Err(e) => println!("  ⚠ Dependency install failed: {}", e),
+            }
+        }
+        Ok(installed)
     }
 
     pub async fn list_installed(mods_dir: &Path) -> Result<Vec<String>> {

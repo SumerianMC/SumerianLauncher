@@ -13,16 +13,19 @@ use client::injection::{GameLauncher, LaunchOptions, detect_java_major, find_jav
 use launcher::{
     auth::{AuthSession, AuthType, Authenticator, ProfileManager},
     backup::BackupManager,
+    config::ConfigManager,
     downloader::Downloader,
     history::{HistoryManager, LaunchRecord},
     instances::{InstanceManager, InstanceProfile, WorldManager},
     loader,
     manifest::VersionManifest,
     mod_updates,
+    modpacks::ModpackInstaller,
     mods::ModManager,
     news,
     presets::{LaunchPreset, PresetManager},
     screenshots::ScreenshotGallery,
+    servers::ServerBrowser,
     skins::SkinManager,
     updater,
     version::VersionManager,
@@ -163,6 +166,9 @@ async fn main() -> Result<()> {
     let mod_mgr = ModManager::new(http.clone());
     let backup_mgr = BackupManager::new(&base);
     let skin_mgr = SkinManager::new(http.clone());
+    let server_browser = ServerBrowser::new(&base);
+    let modpack_installer = ModpackInstaller::new(http.clone());
+    let config_mgr = ConfigManager::new(&base);
     let mut lang = load_lang(&base);
 
     loop {
@@ -184,6 +190,9 @@ async fn main() -> Result<()> {
             lang.menu_view_installed.as_str(),
             lang.menu_launch_history.as_str(),
             lang.menu_news.as_str(),
+            "Server Browser",
+            "Install Modpack",
+            "Settings",
             "Language / Idioma / Langue",
             lang.menu_exit.as_str(),
         ];
@@ -196,8 +205,8 @@ async fn main() -> Result<()> {
         match choice {
             0 => install_version(&http, &downloader, &version_mgr, &game).await?,
             1 => install_mod_loader(&http, &version_mgr, &game).await?,
-            2 => launch_game(&http, &downloader, &auth, &profiles, &version_mgr, &texture_mgr, &shader_mgr, &history_mgr, &instance_mgr, &game).await?,
-            3 => launch_preset(&http, &downloader, &auth, &profiles, &preset_mgr, &version_mgr, &texture_mgr, &shader_mgr, &history_mgr, &instance_mgr, &game).await?,
+            2 => launch_game(&http, &downloader, &auth, &profiles, &version_mgr, &texture_mgr, &shader_mgr, &history_mgr, &instance_mgr, &backup_mgr, &config_mgr, &game).await?,
+            3 => launch_preset(&http, &downloader, &auth, &profiles, &preset_mgr, &version_mgr, &texture_mgr, &shader_mgr, &history_mgr, &instance_mgr, &backup_mgr, &config_mgr, &game).await?,
             4 => manage_presets(&preset_mgr, &version_mgr, &texture_mgr, &shader_mgr).await?,
             5 => manage_accounts(&auth, &profiles, &base).await?,
             6 => manage_textures(&texture_mgr, &game).await?,
@@ -211,7 +220,10 @@ async fn main() -> Result<()> {
             14 => list_installed(&version_mgr).await?,
             15 => view_launch_history(&history_mgr).await?,
             16 => view_news(&http).await?,
-            17 => {
+            17 => server_browser_menu(&server_browser).await?,
+            18 => install_modpack(&modpack_installer, &instance_mgr, &version_mgr).await?,
+            19 => settings_menu(&config_mgr).await?,
+            20 => {
                 let all = Lang::all();
                 let names: Vec<&str> = all.iter().map(|l| l.name.as_str()).collect();
                 let cur = all.iter().position(|l| l.code == lang.code).unwrap_or(0);
@@ -224,7 +236,7 @@ async fn main() -> Result<()> {
                 let _ = save_lang(&base, &lang.code);
                 println!("  {} Language set to {}", style("✓").green(), style(&lang.name).cyan());
             }
-            18 => {
+            21 => {
                 println!("  {}", lang.goodbye);
                 break;
             }
@@ -314,6 +326,8 @@ async fn launch_game(
     shader_mgr: &ShaderManager,
     history_mgr: &HistoryManager,
     instance_mgr: &InstanceManager,
+    backup_mgr: &BackupManager,
+    config_mgr: &ConfigManager,
     game_dir: &PathBuf,
 ) -> Result<()> {
     // List installed versions
@@ -449,6 +463,21 @@ async fn launch_game(
 
     check_java_version(&meta, &http).await;
     warn_if_low_ram(&profile);
+
+    // Auto-backup on launch if enabled
+    let cfg = config_mgr.load().await;
+    if cfg.auto_backup_on_launch {
+        let backup_dir = game_dir_override.as_ref().unwrap_or(game_dir);
+        let inst_label = game_dir_override.as_ref()
+            .and_then(|d| d.file_name())
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "default".to_string());
+        print!("  {} Auto-backup... ", style("→").cyan());
+        match backup_mgr.create_backup(&inst_label, backup_dir).await {
+            Ok(p) => println!("{} ({})", style("✓").green(), p.file_name().unwrap_or_default().to_string_lossy()),
+            Err(e) => println!("{} {}", style("⚠").yellow(), e),
+        }
+    }
 
     // ── Account selection ────────────────────────────────────────────────────
     let mut session = pick_session(auth, profiles).await?;
@@ -851,6 +880,8 @@ async fn launch_preset(
     shader_mgr: &ShaderManager,
     history_mgr: &HistoryManager,
     instance_mgr: &InstanceManager,
+    backup_mgr: &BackupManager,
+    config_mgr: &ConfigManager,
     game_dir: &PathBuf,
 ) -> Result<()> {
     let presets = preset_mgr.load_all().await?;
@@ -920,6 +951,21 @@ async fn launch_preset(
 
     check_java_version(&meta, &http).await;
     warn_if_low_ram(&preset.optimization);
+
+    // Auto-backup on launch if enabled
+    let cfg = config_mgr.load().await;
+    if cfg.auto_backup_on_launch {
+        let backup_dir = match &preset.instance {
+            Some(name) => instance_mgr.instance_dir(name),
+            None => game_dir.clone(),
+        };
+        let inst_label = preset.instance.as_deref().unwrap_or("default");
+        print!("  {} Auto-backup... ", style("→").cyan());
+        match backup_mgr.create_backup(inst_label, &backup_dir).await {
+            Ok(p) => println!("{} ({})", style("✓").green(), p.file_name().unwrap_or_default().to_string_lossy()),
+            Err(e) => println!("{} {}", style("⚠").yellow(), e),
+        }
+    }
 
     let mut session = pick_session(auth, profiles).await?;
     // Session validation
@@ -1371,13 +1417,14 @@ async fn manage_instances(
         println!();
         println!("  {} Instances ({})", style("◆").cyan(), instances.len());
         for i in &instances {
-            println!("  • {} [{}]  created: {}", style(&i.name).cyan(), i.version_id, &i.created_at[..10]);
+            let notes_str = if i.notes.is_empty() { String::new() } else { format!("  — {}", style(&i.notes).dim()) };
+            println!("  • {} [{}]  created: {}{}", style(&i.name).cyan(), i.version_id, &i.created_at[..10], notes_str);
         }
         println!();
 
         let choice = Select::with_theme(&theme())
             .with_prompt("Instance Manager")
-            .items(&["Create instance", "Delete instance", "Edit profile", "Backup instance", "Restore backup", "Export instance", "Import instance", "Back"])
+            .items(&["Create instance", "Clone instance", "Delete instance", "Edit profile", "Edit notes", "Manage mod profile", "Backup instance", "Restore backup", "Export instance", "Import instance", "Back"])
             .default(0)
             .interact()?;
 
@@ -1409,6 +1456,20 @@ async fn manage_instances(
                 }
             }
             1 => {
+                if instances.is_empty() { println!("  No instances to clone."); continue; }
+                let labels: Vec<&str> = instances.iter().map(|i| i.name.as_str()).collect();
+                let i = Select::with_theme(&theme()).with_prompt("Instance to clone").items(&labels).default(0).interact()?;
+                let new_name: String = Input::with_theme(&theme())
+                    .with_prompt("New instance name")
+                    .validate_with(|s: &String| if s.trim().is_empty() { Err("Name cannot be empty.") } else { Ok(()) })
+                    .interact_text()?;
+                println!("  {} Cloning '{}' → '{}'...", style("→").cyan(), instances[i].name, new_name.trim());
+                match instance_mgr.clone_instance(&instances[i].name, new_name.trim()).await {
+                    Ok(inst) => println!("  {} Cloned as '{}'", style("✓").green(), inst.name),
+                    Err(e)   => println!("  {} {}", style("✗").red(), e),
+                }
+            }
+            2 => {
                 if instances.is_empty() { println!("  No instances to delete."); continue; }
                 let labels: Vec<&str> = instances.iter().map(|i| i.name.as_str()).collect();
                 let i = Select::with_theme(&theme())
@@ -1424,7 +1485,7 @@ async fn manage_instances(
                     }
                 }
             }
-            2 => {
+            3 => {
                 if instances.is_empty() { println!("  No instances to edit."); continue; }
                 let labels: Vec<&str> = instances.iter().map(|i| i.name.as_str()).collect();
                 let i = Select::with_theme(&theme())
@@ -1438,7 +1499,29 @@ async fn manage_instances(
                     Err(e) => println!("  {} {}", style("✗").red(), e),
                 }
             }
-            3 => {
+            4 => {
+                if instances.is_empty() { println!("  No instances."); continue; }
+                let labels: Vec<&str> = instances.iter().map(|i| i.name.as_str()).collect();
+                let i = Select::with_theme(&theme()).with_prompt("Select instance").items(&labels).default(0).interact()?;
+                let current_notes = instances[i].notes.clone();
+                println!("  Current notes: {}", if current_notes.is_empty() { style("(none)".to_string()).dim().to_string() } else { current_notes.clone() });
+                let notes: String = Input::with_theme(&theme())
+                    .with_prompt("Notes (leave blank to clear)")
+                    .with_initial_text(&current_notes)
+                    .allow_empty(true)
+                    .interact_text()?;
+                match instance_mgr.set_notes(&instances[i].name, notes.trim()).await {
+                    Ok(_)  => println!("  {} Notes saved.", style("✓").green()),
+                    Err(e) => println!("  {} {}", style("✗").red(), e),
+                }
+            }
+            5 => {
+                if instances.is_empty() { println!("  No instances."); continue; }
+                let labels: Vec<&str> = instances.iter().map(|i| i.name.as_str()).collect();
+                let i = Select::with_theme(&theme()).with_prompt("Select instance").items(&labels).default(0).interact()?;
+                manage_mod_profile(&instance_mgr, &instances[i].name).await?;
+            }
+            6 => {
                 if instances.is_empty() { println!("  No instances to back up."); continue; }
                 let labels: Vec<&str> = instances.iter().map(|i| i.name.as_str()).collect();
                 let i = Select::with_theme(&theme())
@@ -1451,7 +1534,7 @@ async fn manage_instances(
                     Err(e)   => println!("  {} {}", style("✗").red(), e),
                 }
             }
-            4 => {
+            7 => {
                 if instances.is_empty() { println!("  No instances available."); continue; }
                 let labels: Vec<&str> = instances.iter().map(|i| i.name.as_str()).collect();
                 let i = Select::with_theme(&theme())
@@ -1480,7 +1563,7 @@ async fn manage_instances(
                     }
                 }
             }
-            5 => {
+            8 => {
                 if instances.is_empty() { println!("  No instances to export."); continue; }
                 let labels: Vec<&str> = instances.iter().map(|i| i.name.as_str()).collect();
                 let i = Select::with_theme(&theme())
@@ -1495,7 +1578,7 @@ async fn manage_instances(
                     Err(e) => println!("  {} {}", style("✗").red(), e),
                 }
             }
-            6 => {
+            9 => {
                 let src: String = Input::with_theme(&theme())
                     .with_prompt("Path to instance zip")
                     .interact_text()?;
@@ -1854,8 +1937,17 @@ async fn manage_mods(
 
                 println!("  {} Downloading...", style("→").cyan());
                 match mod_mgr.download_mod(&versions[v], &mods_dir).await {
-                    Ok(path) => println!("  {} Installed to {}", style("✓").green(), path.display()),
-                    Err(e)   => println!("  {} {}", style("✗").red(), e),
+                    Ok(path) => {
+                        println!("  {} Installed to {}", style("✓").green(), path.display());
+                        // Resolve and install required dependencies
+                        let already = ModManager::list_installed(&mods_dir).await.unwrap_or_default();
+                        match mod_mgr.resolve_dependencies(&versions[v], &game_version, &mods_dir, &already).await {
+                            Ok(deps) if !deps.is_empty() => println!("  {} Installed {} dependenc{}.", style("✓").green(), deps.len(), if deps.len() == 1 { "y" } else { "ies" }),
+                            Ok(_) => {}
+                            Err(e) => println!("  {} Dependency resolution failed: {}", style("⚠").yellow(), e),
+                        }
+                    }
+                    Err(e) => println!("  {} {}", style("✗").red(), e),
                 }
             }
             1 => {
@@ -2094,6 +2186,273 @@ async fn manage_worlds(
             }
             3 => { let _ = open::that(&saves_dir); }
             _ => break,
+        }
+    }
+    Ok(())
+}
+
+// ── Mod Profile Manager ──────────────────────────────────────────────────────
+
+async fn manage_mod_profile(instance_mgr: &InstanceManager, instance: &str) -> Result<()> {
+    loop {
+        let mods_dir = instance_mgr.instance_dir(instance).join("mods");
+        let mp = instance_mgr.load_mod_profile(instance).await;
+
+        // List active jars
+        let mut active: Vec<String> = Vec::new();
+        let mut disabled: Vec<String> = Vec::new();
+        if let Ok(mut rd) = tokio::fs::read_dir(&mods_dir).await {
+            while let Ok(Some(e)) = rd.next_entry().await {
+                let name = e.file_name().to_string_lossy().to_string();
+                if name.ends_with(".jar.disabled") {
+                    disabled.push(name.trim_end_matches(".disabled").to_string());
+                } else if name.ends_with(".jar") {
+                    active.push(name);
+                }
+            }
+        }
+        active.sort(); disabled.sort();
+
+        println!();
+        println!("  {} Mod Profile: {}", style("◆").cyan(), style(instance).cyan().bold());
+        println!("  Active ({}):", active.len());
+        for m in &active { println!("    {} {}", style("•").green(), m); }
+        println!("  Disabled ({}):", disabled.len());
+        for m in &disabled { println!("    {} {}", style("•").dim(), m); }
+        println!();
+        let _ = mp;
+
+        let choice = Select::with_theme(&theme())
+            .with_prompt("Mod Profile")
+            .items(&["Disable a mod", "Enable a mod", "Back"])
+            .default(0)
+            .interact()?;
+
+        match choice {
+            0 => {
+                if active.is_empty() { println!("  No active mods."); continue; }
+                let i = Select::with_theme(&theme()).with_prompt("Disable mod").items(&active).default(0).interact()?;
+                match instance_mgr.disable_mod(instance, &active[i]).await {
+                    Ok(_)  => println!("  {} Disabled '{}'.", style("✓").green(), active[i]),
+                    Err(e) => println!("  {} {}", style("✗").red(), e),
+                }
+            }
+            1 => {
+                if disabled.is_empty() { println!("  No disabled mods."); continue; }
+                let i = Select::with_theme(&theme()).with_prompt("Enable mod").items(&disabled).default(0).interact()?;
+                match instance_mgr.enable_mod(instance, &disabled[i]).await {
+                    Ok(_)  => println!("  {} Enabled '{}'.", style("✓").green(), disabled[i]),
+                    Err(e) => println!("  {} {}", style("✗").red(), e),
+                }
+            }
+            _ => break,
+        }
+    }
+    Ok(())
+}
+
+// ── Server Browser ────────────────────────────────────────────────────────────
+
+async fn server_browser_menu(browser: &ServerBrowser) -> Result<()> {
+    loop {
+        let servers = browser.load().await?;
+        println!();
+        println!("  {} Server Browser ({})", style("◆").cyan(), servers.len());
+        for (idx, s) in servers.iter().enumerate() {
+            let ping = ServerBrowser::ping(s)
+                .map(|ms| format!("{}ms", ms))
+                .unwrap_or_else(|| style("offline").red().to_string());
+            println!("  {}. {} — {}  [{}]", idx + 1, style(&s.name).cyan(), s.address, ping);
+            if !s.notes.is_empty() { println!("     {}", style(&s.notes).dim()); }
+        }
+        println!();
+
+        let choice = Select::with_theme(&theme())
+            .with_prompt("Server Browser")
+            .items(&["Add server", "Remove server", "Back"])
+            .default(0)
+            .interact()?;
+
+        match choice {
+            0 => {
+                let name: String = Input::with_theme(&theme()).with_prompt("Server name").interact_text()?;
+                let address: String = Input::with_theme(&theme()).with_prompt("Address (host or host:port)").interact_text()?;
+                let notes: String = Input::with_theme(&theme()).with_prompt("Notes (optional)").allow_empty(true).interact_text()?;
+                browser.add(launcher::servers::ServerEntry {
+                    name: name.trim().to_string(),
+                    address: address.trim().to_string(),
+                    port: 0,
+                    notes: notes.trim().to_string(),
+                }).await?;
+                println!("  {} Added.", style("✓").green());
+            }
+            1 => {
+                if servers.is_empty() { println!("  No servers saved."); continue; }
+                let labels: Vec<String> = servers.iter().map(|s| format!("{} ({})", s.name, s.address)).collect();
+                let i = Select::with_theme(&theme()).with_prompt("Remove server").items(&labels).default(0).interact()?;
+                let confirm = Confirm::with_theme(&theme()).with_prompt(format!("Remove '{}'?", servers[i].name)).default(false).interact()?;
+                if confirm { browser.remove(i).await?; println!("  {} Removed.", style("✓").green()); }
+            }
+            _ => break,
+        }
+    }
+    Ok(())
+}
+
+// ── Modpack Installer ─────────────────────────────────────────────────────────
+
+async fn install_modpack(
+    installer: &ModpackInstaller,
+    instance_mgr: &InstanceManager,
+    version_mgr: &VersionManager,
+) -> Result<()> {
+    let installed = version_mgr.list_installed().await?;
+    let game_version = if installed.is_empty() {
+        Input::with_theme(&theme()).with_prompt("Game version (e.g. 1.21.1)").interact_text()?
+    } else {
+        let labels: Vec<String> = installed.iter().map(|v| v.id.clone()).collect();
+        let i = Select::with_theme(&theme()).with_prompt("Game version").items(&labels).default(0).interact()?;
+        installed[i].id.clone()
+    };
+
+    let query: String = Input::with_theme(&theme())
+        .with_prompt("Search Modrinth modpacks")
+        .validate_with(|s: &String| if s.trim().is_empty() { Err("Query cannot be empty.") } else { Ok(()) })
+        .interact_text()?;
+
+    println!("  {} Searching...", style("→").cyan());
+    let hits = match installer.search(query.trim(), &game_version).await {
+        Ok(h) => h,
+        Err(e) => { println!("  {} {}", style("✗").red(), e); return Ok(()); }
+    };
+    if hits.is_empty() { println!("  No modpacks found."); return Ok(()); }
+
+    let hit_labels: Vec<String> = hits.iter()
+        .map(|h| format!("{} — {} ({} downloads)", h.title, h.description.chars().take(50).collect::<String>(), h.downloads))
+        .collect();
+    let h = Select::with_theme(&theme()).with_prompt("Select modpack").items(&hit_labels).default(0).interact()?;
+
+    let versions = match installer.get_versions(&hits[h].project_id, &game_version).await {
+        Ok(v) => v,
+        Err(e) => { println!("  {} {}", style("✗").red(), e); return Ok(()); }
+    };
+    if versions.is_empty() { println!("  No compatible versions found."); return Ok(()); }
+
+    let ver_labels: Vec<String> = versions.iter()
+        .map(|v| format!("{} ({})", v.name, v.game_versions.join(", ")))
+        .collect();
+    let v = Select::with_theme(&theme()).with_prompt("Select version").items(&ver_labels).default(0).interact()?;
+
+    let inst_name: String = Input::with_theme(&theme())
+        .with_prompt("Instance name for this modpack")
+        .with_initial_text(&hits[h].title.replace(' ', "-").to_lowercase())
+        .validate_with(|s: &String| if s.trim().is_empty() { Err("Name cannot be empty.") } else { Ok(()) })
+        .interact_text()?;
+
+    let inst_dir = instance_mgr.instance_dir(inst_name.trim());
+    match installer.install_mrpack(&versions[v], &inst_dir).await {
+        Ok((mc_ver, fabric, forge)) => {
+            println!("  {} Modpack installed to '{}'", style("✓").green(), inst_name.trim());
+            println!("     Minecraft: {}", mc_ver);
+            if let Some(f) = fabric { println!("     Fabric loader: {}", f); }
+            if let Some(f) = forge  { println!("     Forge: {}", f); }
+            println!("  {} Install the matching Minecraft version and mod loader, then create an instance pointing to this directory.", style("ℹ").cyan());
+        }
+        Err(e) => println!("  {} {}", style("✗").red(), e),
+    }
+    Ok(())
+}
+
+// ── Settings / Config GUI ─────────────────────────────────────────────────────
+
+async fn settings_menu(config_mgr: &ConfigManager) -> Result<()> {
+    loop {
+        let mut cfg = config_mgr.load().await;
+        println!();
+        println!("  {} Settings", style("◆").cyan());
+        println!("  Default optimization : {}", style(&cfg.default_optimization).cyan());
+        println!("  Auto-backup on launch: {}", if cfg.auto_backup_on_launch { style("on").green() } else { style("off").dim() });
+        println!("  Discord RPC          : {}", if cfg.discord_rpc { style("on").green() } else { style("off").dim() });
+        println!("  Check updates        : {}", if cfg.check_updates_on_start { style("on").green() } else { style("off").dim() });
+        println!("  Default resolution   : {}",
+            match (cfg.default_width, cfg.default_height) {
+                (Some(w), Some(h)) => format!("{}x{}", w, h),
+                _ => "default".into(),
+            }
+        );
+        println!("  Java 8 path          : {}", cfg.java8_path.as_deref().unwrap_or("auto"));
+        println!("  Java 21 path         : {}", cfg.java21_path.as_deref().unwrap_or("auto"));
+        println!("  Java 25 path         : {}", cfg.java25_path.as_deref().unwrap_or("auto"));
+        println!();
+
+        let choice = Select::with_theme(&theme())
+            .with_prompt("Settings")
+            .items(&[
+                "Default optimization profile",
+                "Toggle auto-backup on launch",
+                "Toggle Discord RPC",
+                "Toggle update check on start",
+                "Set default resolution",
+                "Set Java 8 path",
+                "Set Java 21 path",
+                "Set Java 25 path",
+                "Back",
+            ])
+            .default(0)
+            .interact()?;
+
+        match choice {
+            0 => {
+                let opts = OptimizationProfile::all();
+                let labels: Vec<String> = opts.iter().map(|p| format!("{} — {}", p, p.description())).collect();
+                let cur = opts.iter().position(|p| p == &cfg.default_optimization).unwrap_or(0);
+                let i = Select::with_theme(&theme()).with_prompt("Default profile").items(&labels).default(cur).interact()?;
+                cfg.default_optimization = OptimizationProfile::from_index(i);
+            }
+            1 => { cfg.auto_backup_on_launch = !cfg.auto_backup_on_launch; }
+            2 => { cfg.discord_rpc = !cfg.discord_rpc; }
+            3 => { cfg.check_updates_on_start = !cfg.check_updates_on_start; }
+            4 => {
+                let use_res = Confirm::with_theme(&theme()).with_prompt("Set custom resolution?").default(cfg.default_width.is_some()).interact()?;
+                if use_res {
+                    let w: String = Input::with_theme(&theme()).with_prompt("Width")
+                        .with_initial_text(cfg.default_width.map(|v| v.to_string()).unwrap_or_else(|| "1280".into()))
+                        .validate_with(|s: &String| s.trim().parse::<u32>().map(|_| ()).map_err(|_| "Must be a number"))
+                        .interact_text()?;
+                    let h: String = Input::with_theme(&theme()).with_prompt("Height")
+                        .with_initial_text(cfg.default_height.map(|v| v.to_string()).unwrap_or_else(|| "720".into()))
+                        .validate_with(|s: &String| s.trim().parse::<u32>().map(|_| ()).map_err(|_| "Must be a number"))
+                        .interact_text()?;
+                    cfg.default_width = Some(w.trim().parse().unwrap());
+                    cfg.default_height = Some(h.trim().parse().unwrap());
+                } else {
+                    cfg.default_width = None;
+                    cfg.default_height = None;
+                }
+            }
+            5 => {
+                let p: String = Input::with_theme(&theme()).with_prompt("Java 8 binary path (blank = auto)").allow_empty(true)
+                    .with_initial_text(cfg.java8_path.as_deref().unwrap_or("")).interact_text()?;
+                cfg.java8_path = if p.trim().is_empty() { None } else { Some(p.trim().to_string()) };
+                if let Some(ref path) = cfg.java8_path { std::env::set_var("JAVA8_HOME", std::path::Path::new(path).parent().and_then(|p| p.parent()).unwrap_or(std::path::Path::new(path))); }
+            }
+            6 => {
+                let p: String = Input::with_theme(&theme()).with_prompt("Java 21 binary path (blank = auto)").allow_empty(true)
+                    .with_initial_text(cfg.java21_path.as_deref().unwrap_or("")).interact_text()?;
+                cfg.java21_path = if p.trim().is_empty() { None } else { Some(p.trim().to_string()) };
+                if let Some(ref path) = cfg.java21_path { std::env::set_var("JAVA21_HOME", std::path::Path::new(path).parent().and_then(|p| p.parent()).unwrap_or(std::path::Path::new(path))); }
+            }
+            7 => {
+                let p: String = Input::with_theme(&theme()).with_prompt("Java 25 binary path (blank = auto)").allow_empty(true)
+                    .with_initial_text(cfg.java25_path.as_deref().unwrap_or("")).interact_text()?;
+                cfg.java25_path = if p.trim().is_empty() { None } else { Some(p.trim().to_string()) };
+                if let Some(ref path) = cfg.java25_path { std::env::set_var("JAVA25_HOME", std::path::Path::new(path).parent().and_then(|p| p.parent()).unwrap_or(std::path::Path::new(path))); }
+            }
+            _ => break,
+        }
+        match config_mgr.save(&cfg).await {
+            Ok(_)  => println!("  {} Settings saved.", style("✓").green()),
+            Err(e) => println!("  {} {}", style("✗").red(), e),
         }
     }
     Ok(())
