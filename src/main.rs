@@ -1993,7 +1993,10 @@ async fn manage_skins(
             let variant_idx = Select::with_theme(&theme()).with_prompt("Skin variant").items(&["Classic (Steve)", "Slim (Alex)"]).default(0).interact()?;
             let variant = if variant_idx == 0 { "classic" } else { "slim" };
             let result = if is_ely {
-                skin_mgr.upload_skin_ely(token, &PathBuf::from(path_str.trim()), variant).await
+                println!("  {} ely.by skin upload requires an OAuth2 token from account.ely.by.", style("✗").red());
+                println!("  {} Please upload your skin directly at: {}", style("→").cyan(), style("https://ely.by/skins/add").cyan().underlined());
+                let _ = open::that("https://ely.by/skins/add");
+                return Ok(());
             } else {
                 skin_mgr.upload_skin(token, &PathBuf::from(path_str.trim()), variant).await
             };
@@ -2004,14 +2007,14 @@ async fn manage_skins(
         }
         2 => {
             if Confirm::with_theme(&theme()).with_prompt("Reset skin to default?").default(false).interact()? {
-                let result = if is_ely {
-                    skin_mgr.reset_skin_ely(token).await
+                if is_ely {
+                    println!("  {} Manage your ely.by skin at: {}", style("→").cyan(), style("https://ely.by/skins").cyan().underlined());
+                    let _ = open::that("https://ely.by/skins");
                 } else {
-                    skin_mgr.reset_skin(token, &session.uuid).await
-                };
-                match result {
-                    Ok(_)  => println!("  {} Skin reset.", style("✓").green()),
-                    Err(e) => println!("  {} {}", style("✗").red(), e),
+                    match skin_mgr.reset_skin(token, &session.uuid).await {
+                        Ok(_)  => println!("  {} Skin reset.", style("✓").green()),
+                        Err(e) => println!("  {} {}", style("✗").red(), e),
+                    }
                 }
             }
         }
