@@ -1,4 +1,5 @@
 mod client;
+mod lang;
 mod launcher;
 mod optimizer;
 mod renderer;
@@ -27,7 +28,9 @@ use launcher::{
     version::VersionManager,
     discord::DiscordPresence,
 };
+use lang::{Lang, load_lang, save_lang};
 use optimizer::OptimizationProfile;
+
 use renderer::{
     pipeline::RenderPipeline,
     shaders::ShaderManager,
@@ -160,30 +163,33 @@ async fn main() -> Result<()> {
     let mod_mgr = ModManager::new(http.clone());
     let backup_mgr = BackupManager::new(&base);
     let skin_mgr = SkinManager::new(http.clone());
+    let mut lang = load_lang(&base);
 
     loop {
+        let menu_items: Vec<&str> = vec![
+            lang.menu_install_version.as_str(),
+            lang.menu_install_mod_loader.as_str(),
+            lang.menu_launch_game.as_str(),
+            lang.menu_launch_preset.as_str(),
+            lang.menu_manage_presets.as_str(),
+            lang.menu_manage_accounts.as_str(),
+            lang.menu_manage_textures.as_str(),
+            lang.menu_manage_shaders.as_str(),
+            lang.menu_manage_instances.as_str(),
+            lang.menu_manage_mods.as_str(),
+            lang.menu_check_mod_updates.as_str(),
+            lang.menu_manage_skins.as_str(),
+            lang.menu_manage_worlds.as_str(),
+            lang.menu_screenshot_gallery.as_str(),
+            lang.menu_view_installed.as_str(),
+            lang.menu_launch_history.as_str(),
+            lang.menu_news.as_str(),
+            "Language / Idioma / Langue",
+            lang.menu_exit.as_str(),
+        ];
         let choice = Select::with_theme(&theme())
             .with_prompt("Main Menu")
-            .items(&[
-                "Install Version",
-                "Install Mod Loader",
-                "Launch Game",
-                "Launch Preset",
-                "Manage Presets",
-                "Manage Accounts",
-                "Manage Textures",
-                "Manage Shaders",
-                "Manage Instances",
-                "Manage Mods",
-                "Check Mod Updates",
-                "Manage Skins",
-                "Manage Worlds",
-                "Screenshot Gallery",
-                "View Installed Versions",
-                "Launch History",
-                "News",
-                "Exit",
-            ])
+            .items(&menu_items)
             .default(0)
             .interact()?;
 
@@ -206,7 +212,20 @@ async fn main() -> Result<()> {
             15 => view_launch_history(&history_mgr).await?,
             16 => view_news(&http).await?,
             17 => {
-                println!("  Goodbye.");
+                let all = Lang::all();
+                let names: Vec<&str> = all.iter().map(|l| l.name.as_str()).collect();
+                let cur = all.iter().position(|l| l.code == lang.code).unwrap_or(0);
+                let i = Select::with_theme(&theme())
+                    .with_prompt("Select language")
+                    .items(&names)
+                    .default(cur)
+                    .interact()?;
+                lang = all[i].clone();
+                let _ = save_lang(&base, &lang.code);
+                println!("  {} Language set to {}", style("✓").green(), style(&lang.name).cyan());
+            }
+            18 => {
+                println!("  {}", lang.goodbye);
                 break;
             }
             _ => {}
