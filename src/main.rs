@@ -733,6 +733,7 @@ async fn manage_accounts(
                 "Log in with ely.by (add account)",
                 "Refresh ely.by token",
                 "Remove ely.by account",
+                "Connect ely.by skin access",
                 "Back",
             ])
             .default(0)
@@ -858,6 +859,31 @@ async fn manage_accounts(
                 if confirm {
                     auth.remove_session(&ely_accounts[i].uuid).await?;
                     println!("  {} Removed.", style("✓").green());
+                }
+            }
+            9 => {
+                if ely_accounts.is_empty() { println!("  No ely.by accounts. Log in first."); continue; }
+                let labels: Vec<String> = ely_accounts.iter().map(|s| format!("{} ({})", s.username, &s.uuid[..8])).collect();
+                let i = Select::with_theme(&theme()).with_prompt("Select ely.by account").items(&labels).default(0).interact()?;
+                let mut session = ely_accounts[i].clone();
+                let url = launcher::auth::Authenticator::ely_oauth_device_url();
+                println!();
+                println!("  {} Open this URL in your browser and approve access:", style("→").cyan());
+                println!("  {}", style(&url).cyan().underlined());
+                let _ = open::that(&url);
+                println!();
+                let device_code: String = Input::with_theme(&theme())
+                    .with_prompt("Paste the device_code from the URL response (check browser network tab or ely.by docs)")
+                    .interact_text()?;
+                println!("  {} Waiting for authorization...", style("→").cyan());
+                match auth.poll_ely_oauth_token(device_code.trim()).await {
+                    Ok((access, refresh)) => {
+                        session.oauth_token = Some(access);
+                        session.oauth_refresh_token = refresh;
+                        auth.save_session(&session).await?;
+                        println!("  {} Skin access connected for {}.", style("✓").green(), session.username);
+                    }
+                    Err(e) => println!("  {} {}", style("✗").red(), e),
                 }
             }
             _ => break,
@@ -1993,10 +2019,13 @@ async fn manage_skins(
             let variant_idx = Select::with_theme(&theme()).with_prompt("Skin variant").items(&["Classic (Steve)", "Slim (Alex)"]).default(0).interact()?;
             let variant = if variant_idx == 0 { "classic" } else { "slim" };
             let result = if is_ely {
-                println!("  {} ely.by skin upload requires an OAuth2 token from account.ely.by.", style("✗").red());
-                println!("  {} Please upload your skin directly at: {}", style("→").cyan(), style("https://ely.by/skins/add").cyan().underlined());
-                let _ = open::that("https://ely.by/skins/add");
-                return Ok(());
+                match session.oauth_token.as_deref() {
+                    Some(ot) => skin_mgr.upload_skin_ely(ot, &PathBuf::from(path_str.trim()), variant).await,
+                    None => {
+                        println!("  {} No skin API token. Use Manage Accounts → Connect ely.by skin access first.", style("✗").red());
+                        return Ok(());
+                    }
+                }
             } else {
                 skin_mgr.upload_skin(token, &PathBuf::from(path_str.trim()), variant).await
             };
@@ -2007,14 +2036,20 @@ async fn manage_skins(
         }
         2 => {
             if Confirm::with_theme(&theme()).with_prompt("Reset skin to default?").default(false).interact()? {
-                if is_ely {
-                    println!("  {} Manage your ely.by skin at: {}", style("→").cyan(), style("https://ely.by/skins").cyan().underlined());
-                    let _ = open::that("https://ely.by/skins");
-                } else {
-                    match skin_mgr.reset_skin(token, &session.uuid).await {
-                        Ok(_)  => println!("  {} Skin reset.", style("✓").green()),
-                        Err(e) => println!("  {} {}", style("✗").red(), e),
+                let result = if is_ely {
+                    match session.oauth_token.as_deref() {
+                        Some(ot) => skin_mgr.reset_skin_ely(ot).await,
+                        None => {
+                            println!("  {} No skin API token. Use Manage Accounts → Connect ely.by skin access first.", style("✗").red());
+                            return Ok(());
+                        }
                     }
+                } else {
+                    skin_mgr.reset_skin(token, &session.uuid).await
+                };
+                match result {
+                    Ok(_)  => println!("  {} Skin reset.", style("✓").green()),
+                    Err(e) => println!("  {} {}", style("✗").red(), e),
                 }
             }
         }

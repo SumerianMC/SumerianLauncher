@@ -26,6 +26,11 @@ const MS_REFRESH_URL: &str = "https://login.microsoftonline.com/consumers/oauth2
 const ELY_AUTH_URL: &str = "https://authserver.ely.by/auth/authenticate";
 const ELY_REFRESH_URL: &str = "https://authserver.ely.by/auth/refresh";
 const ELY_CLIENT_TOKEN: &str = "sumerian-client";
+// ely.by OAuth2 (for skin API)
+const ELY_OAUTH_CLIENT_ID: &str = "sumerian";
+const ELY_OAUTH_SCOPE: &str = "account_info minecraft_server_session offline_access";
+const ELY_OAUTH_DEVICE_URL: &str = "https://account.ely.by/oauth2/v1/authorization/device";
+const ELY_OAUTH_TOKEN_URL: &str = "https://account.ely.by/api/oauth2/v1/token";
 
 /// Offline UUID namespace — matches what vanilla offline mode uses:
 /// UUID v3 of "OfflinePlayer:<username>" in the DNS namespace.
@@ -56,6 +61,12 @@ pub struct AuthSession {
     pub refresh_token: Option<String>,
     #[serde(default = "default_auth_type")]
     pub auth_type: AuthType,
+    /// ely.by OAuth2 access token for skin API (separate from Yggdrasil game token)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oauth_token: Option<String>,
+    /// ely.by OAuth2 refresh token
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oauth_refresh_token: Option<String>,
 }
 
 fn default_auth_type() -> AuthType {
@@ -99,6 +110,13 @@ struct ElyRefreshResponse {
     selected_profile: ElyProfile,
 }
 
+#[derive(Debug, Deserialize)]
+struct ElyOAuthTokenResponse {
+    access_token: String,
+    refresh_token: Option<String>,
+    error: Option<String>,
+}
+
 /// A saved local (offline) profile.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalProfile {
@@ -119,6 +137,8 @@ impl LocalProfile {
             access_token: "-".into(),
             refresh_token: None,
             auth_type: AuthType::Local,
+            oauth_token: None,
+            oauth_refresh_token: None,
         }
     }
 }
@@ -284,7 +304,20 @@ impl Authenticator {
             AuthType::ElyBy => {
                 let Some(ref rt) = session.refresh_token else { return session; };
                 match self.refresh_ely_token(&session.access_token, rt).await {
-                    Ok(new_session) => { let _ = self.save_session(&new_session).await; new_session }
+                    Ok(mut new_session) => {
+                        // Also refresh OAuth2 token if we have one
+                        if let Some(ref ort) = session.oauth_refresh_token {
+                            if let Ok((oa, or2)) = self.refresh_ely_oauth_token(ort).await {
+                                new_session.oauth_token = Some(oa);
+                                new_session.oauth_refresh_token = or2;
+                            } else {
+                                new_session.oauth_token = session.oauth_token.clone();
+                                new_session.oauth_refresh_token = session.oauth_refresh_token.clone();
+                            }
+                        }
+                        let _ = self.save_session(&new_session).await;
+                        new_session
+                    }
                     Err(_) => session,
                 }
             }
@@ -323,6 +356,8 @@ impl Authenticator {
             access_token: mc_token,
             refresh_token: resp.refresh_token,
             auth_type: AuthType::Microsoft,
+            oauth_token: None,
+            oauth_refresh_token: None,
         })
     }
 
@@ -367,6 +402,8 @@ impl Authenticator {
             access_token: parsed.access_token,
             refresh_token: Some(parsed.client_token),
             auth_type: AuthType::ElyBy,
+            oauth_token: None,
+            oauth_refresh_token: None,
         })
     }
 
@@ -391,6 +428,8 @@ impl Authenticator {
             access_token: resp.access_token,
             refresh_token: Some(resp.client_token),
             auth_type: AuthType::ElyBy,
+            oauth_token: None,
+            oauth_refresh_token: None,
         })
     }
 
@@ -400,6 +439,60 @@ impl Authenticator {
             tokio::fs::remove_file(p).await?;
         }
         Ok(())
+    }
+
+    /// Start ely.by OAuth2 device flow for skin API access.
+    /// Returns the verification URL to open in a browser and the device_code to poll with.
+    pub fn ely_oauth_device_url() -> String {
+        format!(
+            "{}?client_id={}&scope={}",
+            ELY_OAUTH_DEVICE_URL,
+            ELY_OAUTH_CLIENT_ID,
+            ELY_OAUTH_SCOPE.replace(' ', "+")
+        )
+    }
+
+    /// Poll ely.by OAuth2 token endpoint after user approves in browser.
+    pub async fn poll_ely_oauth_token(&self, device_code: &str) -> Result<(String, Option<String>)> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+        let wait = std::time::Duration::from_secs(5);
+        loop {
+            if std::time::Instant::now() > deadline {
+                bail!("ely.by OAuth2 authorization timed out");
+            }
+            tokio::time::sleep(wait).await;
+            let resp = self.client
+                .post(ELY_OAUTH_TOKEN_URL)
+                .form(&[
+                    ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+                    ("client_id", ELY_OAUTH_CLIENT_ID),
+                    ("device_code", device_code),
+                ])
+                .send().await?
+                .json::<ElyOAuthTokenResponse>().await?;
+            match resp.error.as_deref() {
+                None => return Ok((resp.access_token, resp.refresh_token)),
+                Some("authorization_pending") => continue,
+                Some("slow_down") => tokio::time::sleep(std::time::Duration::from_secs(5)).await,
+                Some(e) => bail!("ely.by OAuth2 error: {}", e),
+            }
+        }
+    }
+
+    async fn refresh_ely_oauth_token(&self, refresh_token: &str) -> Result<(String, Option<String>)> {
+        let resp = self.client
+            .post(ELY_OAUTH_TOKEN_URL)
+            .form(&[
+                ("grant_type", "refresh_token"),
+                ("client_id", ELY_OAUTH_CLIENT_ID),
+                ("refresh_token", refresh_token),
+            ])
+            .send().await?
+            .json::<ElyOAuthTokenResponse>().await?;
+        if let Some(e) = resp.error {
+            bail!("ely.by OAuth2 refresh failed: {}", e);
+        }
+        Ok((resp.access_token, resp.refresh_token))
     }
 
     /// Full Microsoft device-code authentication flow.
@@ -459,6 +552,8 @@ impl Authenticator {
             access_token: mc_token,
             refresh_token: ms_token_refresh,
             auth_type: AuthType::Microsoft,
+            oauth_token: None,
+            oauth_refresh_token: None,
         })
     }
 
