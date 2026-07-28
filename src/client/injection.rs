@@ -76,17 +76,20 @@ pub async fn try_auto_install_java(
 
     let _ = std::fs::remove_file(&archive_path);
 
-    // Find the java binary inside the extracted directory
+    // Find the java binary inside the extracted directory (up to 2 levels deep)
     let bin_name = if cfg!(target_os = "windows") { "java.exe" } else { "java" };
-    // Walk one level: dest_dir/jdk-XX.../bin/java or dest_dir/bin/java
     let candidate = dest_dir.join("bin").join(bin_name);
-    if candidate.exists() {
-        return Ok(candidate);
-    }
-    // Extracted with a versioned subdirectory
+    if candidate.exists() { return Ok(candidate); }
     for entry in std::fs::read_dir(dest_dir)?.flatten() {
         let p = entry.path().join("bin").join(bin_name);
         if p.exists() { return Ok(p); }
+        // two levels deep: dest_dir/subdir/subdir/bin/java
+        if entry.path().is_dir() {
+            for inner in std::fs::read_dir(entry.path())?.flatten() {
+                let p2 = inner.path().join("bin").join(bin_name);
+                if p2.exists() { return Ok(p2); }
+            }
+        }
     }
     bail!("Could not locate java binary after extraction");
 }
@@ -301,6 +304,7 @@ pub fn find_java_for_major(major: u32) -> Option<PathBuf> {
     // Env var overrides: JAVA8_HOME, JAVA21_HOME, JAVA25_HOME, JAVA_HOME
     let env_var = match major {
         8  => "JAVA8_HOME",
+        16 => "JAVA16_HOME",
         21 => "JAVA21_HOME",
         25 => "JAVA25_HOME",
         _  => "JAVA_HOME",
@@ -308,6 +312,31 @@ pub fn find_java_for_major(major: u32) -> Option<PathBuf> {
     if let Ok(home) = std::env::var(env_var) {
         let p = java_bin_in(&home);
         if p.exists() { return Some(p); }
+    }
+
+    // Check SumerianClient managed java dir (handles auto-downloaded JDKs)
+    let managed = dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("SumerianClient").join("java").join(major.to_string());
+    if managed.exists() {
+        let bin_name = if cfg!(target_os = "windows") { "java.exe" } else { "java" };
+        // Check direct, one level, and two levels deep
+        let direct = managed.join("bin").join(bin_name);
+        if direct.exists() { return Some(direct); }
+        if let Ok(entries) = std::fs::read_dir(&managed) {
+            for entry in entries.flatten() {
+                let p = entry.path().join("bin").join(bin_name);
+                if p.exists() { return Some(p); }
+                if entry.path().is_dir() {
+                    if let Ok(inner_entries) = std::fs::read_dir(entry.path()) {
+                        for inner in inner_entries.flatten() {
+                            let p2 = inner.path().join("bin").join(bin_name);
+                            if p2.exists() { return Some(p2); }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // Ordered candidate lists per major version
