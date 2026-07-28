@@ -8,7 +8,7 @@ use console::style;
 use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
 use std::path::PathBuf;
 
-use client::injection::{GameLauncher, LaunchOptions, detect_java_major, find_java_for_major};
+use client::injection::{GameLauncher, LaunchOptions, detect_java_major, find_java_for_major, java_download_url, try_auto_install_java};
 use launcher::{
     auth::{AuthSession, AuthType, Authenticator, ProfileManager},
     backup::BackupManager,
@@ -182,8 +182,8 @@ async fn main() -> Result<()> {
         match choice {
             0 => install_version(&http, &downloader, &version_mgr, &game).await?,
             1 => install_mod_loader(&http, &version_mgr, &game).await?,
-            2 => launch_game(&downloader, &auth, &profiles, &version_mgr, &texture_mgr, &shader_mgr, &history_mgr, &instance_mgr, &game).await?,
-            3 => launch_preset(&downloader, &auth, &profiles, &preset_mgr, &version_mgr, &texture_mgr, &shader_mgr, &history_mgr, &instance_mgr, &game).await?,
+            2 => launch_game(&http, &downloader, &auth, &profiles, &version_mgr, &texture_mgr, &shader_mgr, &history_mgr, &instance_mgr, &game).await?,
+            3 => launch_preset(&http, &downloader, &auth, &profiles, &preset_mgr, &version_mgr, &texture_mgr, &shader_mgr, &history_mgr, &instance_mgr, &game).await?,
             4 => manage_presets(&preset_mgr, &version_mgr, &texture_mgr, &shader_mgr).await?,
             5 => manage_accounts(&auth, &profiles, &base).await?,
             6 => manage_textures(&texture_mgr, &game).await?,
@@ -274,6 +274,7 @@ async fn install_version(
 }
 
 async fn launch_game(
+    http: &reqwest::Client,
     downloader: &Downloader,
     auth: &Authenticator,
     profiles: &ProfileManager,
@@ -415,7 +416,7 @@ async fn launch_game(
         )
         .await?;
 
-    check_java_version(&meta);
+    check_java_version(&meta, &http).await;
 
     // ── Account selection ────────────────────────────────────────────────────
     let session = pick_session(auth, profiles).await?;
@@ -799,6 +800,7 @@ async fn manage_accounts(
 
 /// Launch directly from a saved preset — skips all the individual selectors.
 async fn launch_preset(
+    http: &reqwest::Client,
     downloader: &Downloader,
     auth: &Authenticator,
     profiles: &ProfileManager,
@@ -875,7 +877,7 @@ async fn launch_preset(
         )
         .await?;
 
-    check_java_version(&meta);
+    check_java_version(&meta, &http).await;
 
     let session = pick_session(auth, profiles).await?;
     println!(
@@ -1460,9 +1462,9 @@ async fn view_news(http: &reqwest::Client) -> Result<()> {
     Ok(())
 }
 
-// ── Java version mismatch warning ─────────────────────────────────────────────
+// ── Java version mismatch warning + auto-install ──────────────────────────────
 
-fn check_java_version(meta: &launcher::manifest::VersionMeta) {
+async fn check_java_version(meta: &launcher::manifest::VersionMeta, http: &reqwest::Client) {
     use client::injection::VersionEra;
 
     let era = VersionEra::detect(&meta.id, &meta.version_type, meta);
@@ -1472,40 +1474,47 @@ fn check_java_version(meta: &launcher::manifest::VersionMeta) {
         meta.java_version.as_ref().map(|j| j.major_version).unwrap_or(21)
     };
 
-    let java_path = match find_java_for_major(required) {
-        Some(p) => p,
-        None => {
-            println!();
-            println!(
-                "  {} Java {} is required for {} but no installation was found.",
-                style("⚠").yellow().bold(),
-                required,
-                meta.id
-            );
-            println!("  The game will likely fail to start.");
-            println!();
-            return;
-        }
-    };
+    // Check if we already have a matching Java
+    let found = find_java_for_major(required)
+        .and_then(|p| detect_java_major(&p).filter(|&v| v == required).map(|_| p));
 
-    if let Some(actual) = detect_java_major(&java_path) {
-        if actual != required {
-            println!();
+    if found.is_some() {
+        return; // correct version present, nothing to do
+    }
+
+    println!();
+    println!(
+        "  {} Java {} not found for {}. Attempting automatic download...",
+        style("⚠").yellow().bold(), required, meta.id
+    );
+
+    let java_dir = base_dir().join("java").join(required.to_string());
+    match try_auto_install_java(http, required, &java_dir).await {
+        Ok(java_bin) => {
+            // Point the env var so find_java_for_major picks it up for the actual launch
+            let env_key = match required {
+                8  => "JAVA8_HOME",
+                21 => "JAVA21_HOME",
+                25 => "JAVA25_HOME",
+                _  => "JAVA_HOME",
+            };
+            std::env::set_var(env_key, java_dir);
             println!(
-                "  {} Java version mismatch for {}",
-                style("⚠").yellow().bold(),
-                style(&meta.id).cyan()
+                "  {} Java {} installed at {}",
+                style("✓").green(), required, java_bin.display()
+            );
+        }
+        Err(e) => {
+            println!(
+                "  {} Auto-install failed: {}",
+                style("✗").red(), e
             );
             println!(
-                "     Required : Java {}",
-                style(required).yellow()
+                "  {} Please download Java {} manually:",
+                style("→").cyan(), required
             );
-            println!(
-                "     Found    : Java {} at {}",
-                style(actual).red(),
-                java_path.display()
-            );
-            println!("     The game may crash. Install Java {} to fix this.", required);
+            println!("     {}", style(java_download_url(required)).cyan().underlined());
+            let _ = open::that(java_download_url(required));
             println!();
         }
     }

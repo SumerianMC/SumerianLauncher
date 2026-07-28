@@ -7,6 +7,90 @@ use crate::launcher::manifest::VersionMeta;
 use crate::launcher::version::VersionManager;
 use crate::optimizer::OptimizationProfile;
 
+/// Download URL shown to the user when auto-install fails.
+pub fn java_download_url(major: u32) -> &'static str {
+    match major {
+        8  => "https://adoptium.net/temurin/releases/?version=8",
+        21 => "https://adoptium.net/temurin/releases/?version=21",
+        25 => "https://adoptium.net/temurin/releases/?version=25",
+        _  => "https://adoptium.net/temurin/releases/",
+    }
+}
+
+/// Try to download and extract Temurin JDK for `major` into `dest_dir`.
+/// Returns the path to the `java` binary on success.
+pub async fn try_auto_install_java(
+    http: &reqwest::Client,
+    major: u32,
+    dest_dir: &PathBuf,
+) -> Result<PathBuf> {
+    let os = if cfg!(target_os = "windows") { "windows" }
+             else if cfg!(target_os = "macos") { "mac" }
+             else { "linux" };
+    let arch = if cfg!(target_arch = "x86_64") { "x64" } else { "aarch64" };
+    let image_type = "jdk";
+    let ext = if cfg!(target_os = "windows") { "zip" } else { "tar.gz" };
+
+    let api = format!(
+        "https://api.adoptium.net/v3/assets/latest/{major}/hotspot?os={os}&architecture={arch}&image_type={image_type}"
+    );
+
+    #[derive(serde::Deserialize)]
+    struct AdoptiumAsset { binary: AdoptiumBinary }
+    #[derive(serde::Deserialize)]
+    struct AdoptiumBinary { package: AdoptiumPackage }
+    #[derive(serde::Deserialize)]
+    struct AdoptiumPackage { link: String }
+
+    let assets: Vec<AdoptiumAsset> = http
+        .get(&api)
+        .send().await.context("Adoptium API request failed")?
+        .json().await.context("Adoptium API parse failed")?;
+
+    let url = assets.into_iter().next()
+        .context("No Adoptium release found")?
+        .binary.package.link;
+
+    println!("  → Downloading Java {major} from Adoptium...");
+
+    let bytes = http.get(&url).send().await?.bytes().await?;
+
+    std::fs::create_dir_all(dest_dir)?;
+    let archive_path = dest_dir.join(format!("jdk{major}.{ext}"));
+    std::fs::write(&archive_path, &bytes)?;
+
+    println!("  → Extracting Java {major}...");
+
+    if cfg!(target_os = "windows") {
+        let file = std::fs::File::open(&archive_path)?;
+        let mut zip = zip::ZipArchive::new(file)?;
+        zip.extract(dest_dir)?;
+    } else {
+        let status = Command::new("tar")
+            .args(["-xzf", archive_path.to_str().unwrap(), "-C", dest_dir.to_str().unwrap(), "--strip-components=1"])
+            .status()?;
+        if !status.success() {
+            bail!("tar extraction failed");
+        }
+    }
+
+    let _ = std::fs::remove_file(&archive_path);
+
+    // Find the java binary inside the extracted directory
+    let bin_name = if cfg!(target_os = "windows") { "java.exe" } else { "java" };
+    // Walk one level: dest_dir/jdk-XX.../bin/java or dest_dir/bin/java
+    let candidate = dest_dir.join("bin").join(bin_name);
+    if candidate.exists() {
+        return Ok(candidate);
+    }
+    // Extracted with a versioned subdirectory
+    for entry in std::fs::read_dir(dest_dir)?.flatten() {
+        let p = entry.path().join("bin").join(bin_name);
+        if p.exists() { return Ok(p); }
+    }
+    bail!("Could not locate java binary after extraction");
+}
+
 /// Era-specific compatibility adapter.
 #[derive(Debug, Clone, PartialEq)]
 pub enum VersionEra {

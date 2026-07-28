@@ -1,6 +1,6 @@
 [package]
 name = "sumerian-client"
-version = "0.3.0"
+version = "0.40.0"
 edition = "2021"
 description = "A modern Rust Minecraft legacy client that brings old Minecraft versions into the future with shaders, textures, and optimization."
 authors = ["Sumerian Client"]
@@ -30,7 +30,5 @@ chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v3", "v4"] }
 base64 = "0.21"
 url = "2"
-ratatui = "0.26"
-crossterm = "0.27"
-sysinfo = "0.30"
 discord-rich-presence = "1.1.0"
+sysinfo = "0.30"
