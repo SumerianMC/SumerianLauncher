@@ -6,8 +6,7 @@ const PROFILE_URL: &str = "https://api.minecraftservices.com/minecraft/profile";
 const SKIN_URL: &str = "https://api.minecraftservices.com/minecraft/profile/skins";
 
 // ely.by skin API
-const ELY_PROFILE_URL: &str = "https://authserver.ely.by/api/user/profile";
-const ELY_SKIN_URL: &str = "https://skinsystem.ely.by/textures/";
+const ELY_SESSION_URL: &str = "https://sessionserver.ely.by/session/minecraft/profile";
 const ELY_SKIN_UPLOAD_URL: &str = "https://skinsystem.ely.by/api/skins";
 
 #[derive(serde::Deserialize)]
@@ -26,9 +25,8 @@ pub struct SkinEntry {
 }
 
 #[derive(serde::Deserialize)]
-struct ElyProfile {
-    id: String,
-    username: String,
+struct ElySessionProfile {
+    name: String,
     properties: Vec<ElyProperty>,
 }
 
@@ -39,12 +37,11 @@ struct ElyProperty {
 }
 
 #[derive(serde::Deserialize)]
-struct ElyTextures {
+struct ElyTexturesWrapper {
     textures: ElyTextureMap,
 }
 
 #[derive(serde::Deserialize)]
-#[serde(rename_all = "UPPERCASE")]
 struct ElyTextureMap {
     #[serde(rename = "SKIN")]
     skin: Option<ElyTexture>,
@@ -80,14 +77,15 @@ impl SkinManager {
     }
 
     pub async fn get_profile_ely(&self, uuid: &str) -> Result<MinecraftProfile> {
-        let url = format!("{}/{}", ELY_PROFILE_URL, uuid);
-        let ely: ElyProfile = self.client
+        // sessionserver expects UUID without dashes
+        let uuid_clean = uuid.replace('-', "");
+        let url = format!("{}/{}", ELY_SESSION_URL, uuid_clean);
+        let ely: ElySessionProfile = self.client
             .get(&url)
             .send().await?
-            .json::<ElyProfile>().await
-            .context("Failed to fetch ely.by profile")?;
+            .json::<ElySessionProfile>().await
+            .context("Failed to fetch ely.by session profile")?;
 
-        // Decode the base64 textures property to get the skin URL
         let textures_b64 = ely.properties.iter()
             .find(|p| p.name == "textures")
             .map(|p| p.value.as_str())
@@ -95,7 +93,7 @@ impl SkinManager {
 
         let skin_entry = if !textures_b64.is_empty() {
             if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(textures_b64) {
-                if let Ok(tex) = serde_json::from_slice::<ElyTextures>(&decoded) {
+                if let Ok(tex) = serde_json::from_slice::<ElyTexturesWrapper>(&decoded) {
                     tex.textures.skin.map(|s| {
                         let variant = s.metadata
                             .and_then(|m| m.model)
@@ -112,8 +110,8 @@ impl SkinManager {
         } else { None };
 
         Ok(MinecraftProfile {
-            id: ely.id,
-            name: ely.username,
+            id: uuid.to_string(),
+            name: ely.name,
             skins: skin_entry.into_iter().collect(),
         })
     }
