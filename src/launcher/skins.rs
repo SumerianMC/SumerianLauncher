@@ -77,37 +77,51 @@ impl SkinManager {
     }
 
     pub async fn get_profile_ely(&self, uuid: &str) -> Result<MinecraftProfile> {
-        // sessionserver expects UUID without dashes
         let uuid_clean = uuid.replace('-', "");
         let url = format!("{}/{}", ELY_SESSION_URL, uuid_clean);
-        let ely: ElySessionProfile = self.client
+
+        let resp = self.client
             .get(&url)
-            .send().await?
-            .json::<ElySessionProfile>().await
-            .context("Failed to fetch ely.by session profile")?;
+            .send().await
+            .context("ely.by sessionserver request failed")?;
+
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+
+        if !status.is_success() {
+            anyhow::bail!("ely.by profile fetch failed (HTTP {}): {}", status, body);
+        }
+
+        let ely: ElySessionProfile = serde_json::from_str(&body)
+            .with_context(|| format!("Failed to parse ely.by profile response: {}", body))?;
 
         let textures_b64 = ely.properties.iter()
             .find(|p| p.name == "textures")
             .map(|p| p.value.as_str())
             .unwrap_or("");
 
-        let skin_entry = if !textures_b64.is_empty() {
-            if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(textures_b64) {
-                if let Ok(tex) = serde_json::from_slice::<ElyTexturesWrapper>(&decoded) {
-                    tex.textures.skin.map(|s| {
-                        let variant = s.metadata
-                            .and_then(|m| m.model)
-                            .unwrap_or_else(|| "classic".into());
-                        SkinEntry {
-                            id: String::new(),
-                            state: "ACTIVE".into(),
-                            url: s.url,
-                            variant,
-                        }
-                    })
-                } else { None }
-            } else { None }
-        } else { None };
+        if textures_b64.is_empty() {
+            anyhow::bail!("ely.by profile returned no textures property for UUID {}", uuid_clean);
+        }
+
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(textures_b64)
+            .context("Failed to base64-decode ely.by textures property")?;
+
+        let tex: ElyTexturesWrapper = serde_json::from_slice(&decoded)
+            .with_context(|| format!("Failed to parse ely.by textures JSON: {}", String::from_utf8_lossy(&decoded)))?;
+
+        let skin_entry = tex.textures.skin.map(|s| {
+            let variant = s.metadata
+                .and_then(|m| m.model)
+                .unwrap_or_else(|| "classic".into());
+            SkinEntry {
+                id: String::new(),
+                state: "ACTIVE".into(),
+                url: s.url,
+                variant,
+            }
+        });
 
         Ok(MinecraftProfile {
             id: uuid.to_string(),

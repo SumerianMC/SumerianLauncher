@@ -348,15 +348,24 @@ impl Authenticator {
             .post(ELY_AUTH_URL)
             .json(&body)
             .send()
-            .await?
-            .json::<ElyAuthResponse>()
             .await
-            .context("ely.by authentication failed")?;
+            .context("ely.by auth request failed")?;
+
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+
+        if !status.is_success() {
+            anyhow::bail!("ely.by login failed (HTTP {}): {}", status, text);
+        }
+
+        let parsed: ElyAuthResponse = serde_json::from_str(&text)
+            .with_context(|| format!("ely.by auth response parse error: {}", text))?;
+
         Ok(AuthSession {
-            username: resp.selected_profile.name,
-            uuid: resp.selected_profile.id,
-            access_token: resp.access_token,
-            refresh_token: Some(resp.client_token),
+            username: parsed.selected_profile.name,
+            uuid: parsed.selected_profile.id,
+            access_token: parsed.access_token,
+            refresh_token: Some(parsed.client_token),
             auth_type: AuthType::ElyBy,
         })
     }
