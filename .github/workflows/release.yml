@@ -6,7 +6,20 @@ on:
       - "v*"
 
 jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      upload_url: ${{ steps.create.outputs.upload_url }}
+    steps:
+      - uses: softprops/action-gh-release@v2
+        id: create
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+
   build-windows:
+    needs: create-release
     runs-on: windows-latest
     permissions:
       contents: write
@@ -17,7 +30,7 @@ jobs:
           targets: x86_64-pc-windows-msvc
       - name: Build
         run: cargo build --release --target x86_64-pc-windows-msvc
-      - name: Release
+      - name: Upload
         uses: softprops/action-gh-release@v2
         with:
           files: target/x86_64-pc-windows-msvc/release/sumerian.exe
@@ -25,6 +38,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
 
   build-linux:
+    needs: create-release
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -55,7 +69,7 @@ jobs:
           EOF
           dpkg-deb --build deb sumerian-linux.deb
 
-      - name: Release
+      - name: Upload
         uses: softprops/action-gh-release@v2
         with:
           files: |
@@ -66,6 +80,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
 
   build-macos:
+    needs: create-release
     runs-on: macos-latest
     permissions:
       contents: write
@@ -100,7 +115,7 @@ jobs:
           cp target/x86_64-apple-darwin/release/sumerian sumerian-macos
           hdiutil create -volname Sumerian -srcfolder Sumerian.app -ov -format UDZO sumerian-macos.dmg
 
-      - name: Release
+      - name: Upload
         uses: softprops/action-gh-release@v2
         with:
           files: |
