@@ -18,7 +18,7 @@ pub fn java_download_url(major: u32) -> &'static str {
 }
 
 /// Try to download and extract Temurin JDK for `major` into `dest_dir`.
-/// Returns the path to the `java` binary on success.
+/// Tries Adoptium API first, then falls back to direct archive mirrors.
 pub async fn try_auto_install_java(
     http: &reqwest::Client,
     major: u32,
@@ -28,13 +28,15 @@ pub async fn try_auto_install_java(
              else if cfg!(target_os = "macos") { "mac" }
              else { "linux" };
     let arch = if cfg!(target_arch = "x86_64") { "x64" } else { "aarch64" };
-    let image_type = "jdk";
     let ext = if cfg!(target_os = "windows") { "zip" } else { "tar.gz" };
 
-    let api = format!(
-        "https://api.adoptium.net/v3/assets/latest/{major}/hotspot?os={os}&architecture={arch}&image_type={image_type}"
-    );
+    // Build candidate URLs: Adoptium API first, then direct fallback mirrors
+    let mut urls: Vec<String> = Vec::new();
 
+    // 1. Adoptium API
+    let api = format!(
+        "https://api.adoptium.net/v3/assets/latest/{major}/hotspot?os={os}&architecture={arch}&image_type=jdk"
+    );
     #[derive(serde::Deserialize)]
     struct AdoptiumAsset { binary: AdoptiumBinary }
     #[derive(serde::Deserialize)]
@@ -42,56 +44,82 @@ pub async fn try_auto_install_java(
     #[derive(serde::Deserialize)]
     struct AdoptiumPackage { link: String }
 
-    let assets: Vec<AdoptiumAsset> = http
-        .get(&api)
-        .send().await.context("Adoptium API request failed")?
-        .json().await.context("Adoptium API parse failed")?;
-
-    let url = assets.into_iter().next()
-        .context("No Adoptium release found")?
-        .binary.package.link;
-
-    println!("  → Downloading Java {major} from Adoptium...");
-
-    let bytes = http.get(&url).send().await?.bytes().await?;
-
-    std::fs::create_dir_all(dest_dir)?;
-    let archive_path = dest_dir.join(format!("jdk{major}.{ext}"));
-    std::fs::write(&archive_path, &bytes)?;
-
-    println!("  → Extracting Java {major}...");
-
-    if cfg!(target_os = "windows") {
-        let file = std::fs::File::open(&archive_path)?;
-        let mut zip = zip::ZipArchive::new(file)?;
-        zip.extract(dest_dir)?;
-    } else {
-        let status = Command::new("tar")
-            .args(["-xzf", archive_path.to_str().unwrap(), "-C", dest_dir.to_str().unwrap(), "--strip-components=1"])
-            .status()?;
-        if !status.success() {
-            bail!("tar extraction failed");
-        }
-    }
-
-    let _ = std::fs::remove_file(&archive_path);
-
-    // Find the java binary inside the extracted directory (up to 2 levels deep)
-    let bin_name = if cfg!(target_os = "windows") { "java.exe" } else { "java" };
-    let candidate = dest_dir.join("bin").join(bin_name);
-    if candidate.exists() { return Ok(candidate); }
-    for entry in std::fs::read_dir(dest_dir)?.flatten() {
-        let p = entry.path().join("bin").join(bin_name);
-        if p.exists() { return Ok(p); }
-        // two levels deep: dest_dir/subdir/subdir/bin/java
-        if entry.path().is_dir() {
-            for inner in std::fs::read_dir(entry.path())?.flatten() {
-                let p2 = inner.path().join("bin").join(bin_name);
-                if p2.exists() { return Ok(p2); }
+    if let Ok(resp) = http.get(&api).send().await {
+        if let Ok(assets) = resp.json::<Vec<AdoptiumAsset>>().await {
+            if let Some(asset) = assets.into_iter().next() {
+                urls.push(asset.binary.package.link);
             }
         }
     }
-    bail!("Could not locate java binary after extraction");
+
+    // 2. Direct Adoptium archive fallback mirrors
+    let (win_zip, linux_tar) = match major {
+        8  => (
+            "https://github.com/adoptium/temurin8-binaries/releases/download/jdk8u392-b08/OpenJDK8U-jdk_x64_windows_hotspot_8u392b08.zip",
+            "https://github.com/adoptium/temurin8-binaries/releases/download/jdk8u392-b08/OpenJDK8U-jdk_x64_linux_hotspot_8u392b08.tar.gz",
+        ),
+        16 => (
+            "https://github.com/adoptium/temurin16-binaries/releases/download/jdk-16.0.2%2B7/OpenJDK16U-jdk_x64_windows_hotspot_16.0.2_7.zip",
+            "https://github.com/adoptium/temurin16-binaries/releases/download/jdk-16.0.2%2B7/OpenJDK16U-jdk_x64_linux_hotspot_16.0.2_7.tar.gz",
+        ),
+        17 => (
+            "https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.9%2B9/OpenJDK17U-jdk_x64_windows_hotspot_17.0.9_9.zip",
+            "https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.9%2B9/OpenJDK17U-jdk_x64_linux_hotspot_17.0.9_9.tar.gz",
+        ),
+        21 => (
+            "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.1%2B12/OpenJDK21U-jdk_x64_windows_hotspot_21.0.1_12.zip",
+            "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.1%2B12/OpenJDK21U-jdk_x64_linux_hotspot_21.0.1_12.tar.gz",
+        ),
+        _ => ("", ""),
+    };
+    let fallback = if cfg!(target_os = "windows") { win_zip } else { linux_tar };
+    if !fallback.is_empty() { urls.push(fallback.to_string()); }
+
+    // Try each URL in order
+    let mut last_err = anyhow::anyhow!("No download URLs available for Java {major}");
+    for url in &urls {
+        println!("  → Downloading Java {major}...");
+        match http.get(url).send().await.and_then(|r| Ok(r)) {
+            Ok(resp) if resp.status().is_success() => {
+                let bytes = resp.bytes().await?;
+                std::fs::create_dir_all(dest_dir)?;
+                let archive_path = dest_dir.join(format!("jdk{major}.{ext}"));
+                std::fs::write(&archive_path, &bytes)?;
+
+                println!("  → Extracting Java {major}...");
+                if cfg!(target_os = "windows") {
+                    let file = std::fs::File::open(&archive_path)?;
+                    let mut zip = zip::ZipArchive::new(file)?;
+                    zip.extract(dest_dir)?;
+                } else {
+                    let status = Command::new("tar")
+                        .args(["-xzf", archive_path.to_str().unwrap(), "-C", dest_dir.to_str().unwrap(), "--strip-components=1"])
+                        .status()?;
+                    if !status.success() { bail!("tar extraction failed"); }
+                }
+                let _ = std::fs::remove_file(&archive_path);
+
+                // Find binary up to 2 levels deep
+                let bin_name = if cfg!(target_os = "windows") { "java.exe" } else { "java" };
+                let candidate = dest_dir.join("bin").join(bin_name);
+                if candidate.exists() { return Ok(candidate); }
+                for entry in std::fs::read_dir(dest_dir)?.flatten() {
+                    let p = entry.path().join("bin").join(bin_name);
+                    if p.exists() { return Ok(p); }
+                    if entry.path().is_dir() {
+                        for inner in std::fs::read_dir(entry.path())?.flatten() {
+                            let p2 = inner.path().join("bin").join(bin_name);
+                            if p2.exists() { return Ok(p2); }
+                        }
+                    }
+                }
+                bail!("Could not locate java binary after extraction");
+            }
+            Ok(resp) => { last_err = anyhow::anyhow!("HTTP {}", resp.status()); }
+            Err(e) => { last_err = e.into(); }
+        }
+    }
+    Err(last_err)
 }
 
 /// Era-specific compatibility adapter.

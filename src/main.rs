@@ -17,9 +17,12 @@ use launcher::{
     instances::{InstanceManager, InstanceProfile},
     loader,
     manifest::VersionManifest,
+    mod_updates,
     mods::ModManager,
     news,
     presets::{LaunchPreset, PresetManager},
+    screenshots::ScreenshotGallery,
+    skins::SkinManager,
     updater,
     version::VersionManager,
     discord::DiscordPresence,
@@ -156,6 +159,7 @@ async fn main() -> Result<()> {
     let instance_mgr = InstanceManager::new(&base);
     let mod_mgr = ModManager::new(http.clone());
     let backup_mgr = BackupManager::new(&base);
+    let skin_mgr = SkinManager::new(http.clone());
 
     loop {
         let choice = Select::with_theme(&theme())
@@ -171,6 +175,9 @@ async fn main() -> Result<()> {
                 "Manage Shaders",
                 "Manage Instances",
                 "Manage Mods",
+                "Check Mod Updates",
+                "Manage Skins",
+                "Screenshot Gallery",
                 "View Installed Versions",
                 "Launch History",
                 "News",
@@ -190,10 +197,13 @@ async fn main() -> Result<()> {
             7 => manage_shaders(&shader_mgr, &game).await?,
             8 => manage_instances(&instance_mgr, &version_mgr, &backup_mgr, &game).await?,
             9 => manage_mods(&mod_mgr, &instance_mgr, &version_mgr, &game).await?,
-            10 => list_installed(&version_mgr).await?,
-            11 => view_launch_history(&history_mgr).await?,
-            12 => view_news(&http).await?,
-            13 => {
+            10 => check_mod_updates(&http, &instance_mgr, &version_mgr, &game).await?,
+            11 => manage_skins(&skin_mgr, &auth, &profiles).await?,
+            12 => screenshot_gallery(&instance_mgr, &game).await?,
+            13 => list_installed(&version_mgr).await?,
+            14 => view_launch_history(&history_mgr).await?,
+            15 => view_news(&http).await?,
+            16 => {
                 println!("  Goodbye.");
                 break;
             }
@@ -417,6 +427,7 @@ async fn launch_game(
         .await?;
 
     check_java_version(&meta, &http).await;
+    warn_if_low_ram(&profile);
 
     // ── Account selection ────────────────────────────────────────────────────
     let session = pick_session(auth, profiles).await?;
@@ -878,6 +889,7 @@ async fn launch_preset(
         .await?;
 
     check_java_version(&meta, &http).await;
+    warn_if_low_ram(&preset.optimization);
 
     let session = pick_session(auth, profiles).await?;
     println!(
@@ -1321,7 +1333,7 @@ async fn manage_instances(
 
         let choice = Select::with_theme(&theme())
             .with_prompt("Instance Manager")
-            .items(&["Create instance", "Delete instance", "Edit profile", "Backup instance", "Restore backup", "Back"])
+            .items(&["Create instance", "Delete instance", "Edit profile", "Backup instance", "Restore backup", "Export instance", "Import instance", "Back"])
             .default(0)
             .interact()?;
 
@@ -1422,6 +1434,30 @@ async fn manage_instances(
                         Ok(_)  => println!("  {} Restored.", style("✓").green()),
                         Err(e) => println!("  {} {}", style("✗").red(), e),
                     }
+                }
+            }
+            5 => {
+                if instances.is_empty() { println!("  No instances to export."); continue; }
+                let labels: Vec<&str> = instances.iter().map(|i| i.name.as_str()).collect();
+                let i = Select::with_theme(&theme())
+                    .with_prompt("Select instance to export")
+                    .items(&labels).default(0).interact()?;
+                let dest: String = Input::with_theme(&theme())
+                    .with_prompt("Save zip to path")
+                    .with_initial_text(format!("{}.zip", instances[i].name))
+                    .interact_text()?;
+                match instance_mgr.export(&instances[i].name, &std::path::PathBuf::from(dest.trim())).await {
+                    Ok(_)  => println!("  {} Exported.", style("✓").green()),
+                    Err(e) => println!("  {} {}", style("✗").red(), e),
+                }
+            }
+            6 => {
+                let src: String = Input::with_theme(&theme())
+                    .with_prompt("Path to instance zip")
+                    .interact_text()?;
+                match instance_mgr.import(&std::path::PathBuf::from(src.trim())).await {
+                    Ok(inst) => println!("  {} Imported instance '{}'", style("✓").green(), inst.name),
+                    Err(e)   => println!("  {} {}", style("✗").red(), e),
                 }
             }
             _ => break,
@@ -1800,6 +1836,175 @@ async fn manage_mods(
                 }
             }
             _ => break,
+        }
+    }
+    Ok(())
+}
+
+// ── RAM Warning ───────────────────────────────────────────────────────────────
+
+fn warn_if_low_ram(profile: &OptimizationProfile) {
+    let required_mb: u64 = match profile {
+        OptimizationProfile::Quality     => 6144,
+        OptimizationProfile::Performance => 4096,
+        OptimizationProfile::Balanced    => 2048,
+        OptimizationProfile::Potato      => 512,
+        OptimizationProfile::Auto        => optimizer::auto_heap_mb() as u64,
+    };
+    let mut sys = sysinfo::System::new();
+    sys.refresh_memory();
+    let free_mb = sys.available_memory() / 1024 / 1024;
+    if free_mb < required_mb {
+        println!();
+        println!(
+            "  {} Low RAM: profile needs {}MB but only {}MB is free.",
+            style("⚠").yellow().bold(), required_mb, free_mb
+        );
+        println!("     Consider switching to a lighter optimization profile.");
+        println!();
+    }
+}
+
+// ── Skin Manager ──────────────────────────────────────────────────────────────
+
+async fn manage_skins(
+    skin_mgr: &SkinManager,
+    auth: &Authenticator,
+    profiles: &ProfileManager,
+) -> Result<()> {
+    let session = pick_session(auth, profiles).await?;
+    if session.auth_type != launcher::auth::AuthType::Microsoft {
+        println!("  {} Skin management requires a Microsoft account.", style("✗").red());
+        return Ok(());
+    }
+    let token = session.effective_token();
+    let choice = Select::with_theme(&theme())
+        .with_prompt("Skin Manager")
+        .items(&["View current skin", "Upload skin", "Reset to default", "Back"])
+        .default(0)
+        .interact()?;
+    match choice {
+        0 => match skin_mgr.get_profile(token).await {
+            Ok(p) => {
+                println!("  {} {}", style("Player:").dim(), style(&p.name).cyan());
+                if let Some(skin) = p.skins.iter().find(|s| s.state == "ACTIVE") {
+                    println!("  {} {}", style("Skin URL:").dim(), style(&skin.url).cyan());
+                    println!("  {} {}", style("Variant:").dim(), &skin.variant);
+                } else {
+                    println!("  No active skin found.");
+                }
+            }
+            Err(e) => println!("  {} {}", style("✗").red(), e),
+        },
+        1 => {
+            let path_str: String = Input::with_theme(&theme()).with_prompt("Path to skin PNG").interact_text()?;
+            let variant_idx = Select::with_theme(&theme()).with_prompt("Skin variant").items(&["Classic (Steve)", "Slim (Alex)"]).default(0).interact()?;
+            let variant = if variant_idx == 0 { "classic" } else { "slim" };
+            match skin_mgr.upload_skin(token, &PathBuf::from(path_str.trim()), variant).await {
+                Ok(_)  => println!("  {} Skin uploaded.", style("✓").green()),
+                Err(e) => println!("  {} {}", style("✗").red(), e),
+            }
+        }
+        2 => {
+            if Confirm::with_theme(&theme()).with_prompt("Reset skin to default?").default(false).interact()? {
+                match skin_mgr.reset_skin(token, &session.uuid).await {
+                    Ok(_)  => println!("  {} Skin reset.", style("✓").green()),
+                    Err(e) => println!("  {} {}", style("✗").red(), e),
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+// ── Mod Update Checker ────────────────────────────────────────────────────────
+
+async fn check_mod_updates(
+    http: &reqwest::Client,
+    instance_mgr: &InstanceManager,
+    version_mgr: &VersionManager,
+    game_dir: &PathBuf,
+) -> Result<()> {
+    let instances = instance_mgr.load_all().await?;
+    let mods_dir = if instances.is_empty() {
+        game_dir.join("mods")
+    } else {
+        let mut labels: Vec<String> = vec!["Default game dir".into()];
+        labels.extend(instances.iter().map(|i| format!("{} [{}]", i.name, i.version_id)));
+        let i = Select::with_theme(&theme()).with_prompt("Check updates for").items(&labels).default(0).interact()?;
+        if i == 0 { game_dir.join("mods") } else { instance_mgr.instance_dir(&instances[i - 1].name).join("mods") }
+    };
+    let installed = version_mgr.list_installed().await?;
+    let game_version = if installed.is_empty() { "1.21".to_string() } else {
+        let labels: Vec<String> = installed.iter().map(|v| v.id.clone()).collect();
+        let i = Select::with_theme(&theme()).with_prompt("Game version").items(&labels).default(0).interact()?;
+        installed[i].id.clone()
+    };
+    let loader_idx = Select::with_theme(&theme()).with_prompt("Mod loader").items(&["fabric", "forge", "quilt"]).default(0).interact()?;
+    let loader = ["fabric", "forge", "quilt"][loader_idx];
+    println!("  {} Checking for updates...", style("→").cyan());
+    let updates = match mod_updates::check_updates(http, &mods_dir, &game_version, loader).await {
+        Ok(u) => u,
+        Err(e) => { println!("  {} {}", style("✗").red(), e); return Ok(()); }
+    };
+    if updates.is_empty() {
+        println!("  {} All mods are up to date.", style("✓").green());
+        return Ok(());
+    }
+    println!();
+    println!("  {} {} update(s) available:", style("◆").cyan(), updates.len());
+    for u in &updates {
+        println!("  • {} {} → {}", style(&u.filename).cyan(), style(&u.current_version).dim(), style(&u.latest_version).green());
+    }
+    println!();
+    if Confirm::with_theme(&theme()).with_prompt("Update all?").default(true).interact()? {
+        for u in &updates {
+            print!("  {} Updating {}... ", style("→").cyan(), u.filename);
+            match mod_updates::apply_update(http, &mods_dir, u).await {
+                Ok(_)  => println!("{}", style("✓").green()),
+                Err(e) => println!("{} {}", style("✗").red(), e),
+            }
+        }
+    }
+    Ok(())
+}
+
+// ── Screenshot Gallery ────────────────────────────────────────────────────────
+
+async fn screenshot_gallery(
+    instance_mgr: &InstanceManager,
+    game_dir: &PathBuf,
+) -> Result<()> {
+    let instances = instance_mgr.load_all().await?;
+    let dir = if instances.is_empty() {
+        game_dir.clone()
+    } else {
+        let mut labels: Vec<String> = vec!["Default game dir".into()];
+        labels.extend(instances.iter().map(|i| i.name.clone()));
+        let i = Select::with_theme(&theme()).with_prompt("Screenshots from").items(&labels).default(0).interact()?;
+        if i == 0 { game_dir.clone() } else { instance_mgr.instance_dir(&instances[i - 1].name) }
+    };
+    let shots = ScreenshotGallery::list(&dir).await?;
+    if shots.is_empty() {
+        println!("  No screenshots found in {}", dir.join("screenshots").display());
+        return Ok(());
+    }
+    let mut labels: Vec<String> = shots.iter()
+        .map(|p| p.file_name().unwrap_or_default().to_string_lossy().to_string())
+        .collect();
+    labels.push("Open folder".into());
+    labels.push("Back".into());
+    println!();
+    println!("  {} Screenshots ({})", style("◆").cyan(), shots.len());
+    println!();
+    let idx = Select::with_theme(&theme()).with_prompt("Select screenshot").items(&labels).default(0).interact()?;
+    if idx == shots.len() {
+        let _ = ScreenshotGallery::open_folder(&dir);
+    } else if idx < shots.len() {
+        match ScreenshotGallery::open(&shots[idx]) {
+            Ok(_)  => println!("  {} Opened.", style("✓").green()),
+            Err(e) => println!("  {} {}", style("✗").red(), e),
         }
     }
     Ok(())
