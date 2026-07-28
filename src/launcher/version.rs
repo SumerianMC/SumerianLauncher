@@ -149,6 +149,7 @@ impl VersionManager {
         username: &str,
         access_token: &str,
         uuid: &str,
+        user_type: &str,
     ) -> Vec<String> {
         let assets_dir = game_dir.join("assets");
         let asset_index = meta
@@ -169,7 +170,7 @@ impl VersionManager {
                         .replace("${assets_index_name}", asset_index)
                         .replace("${auth_uuid}", uuid)
                         .replace("${auth_access_token}", access_token)
-                        .replace("${user_type}", "msa")
+                        .replace("${user_type}", user_type)
                         .replace("${version_type}", &meta.version_type)
                         .replace("${user_properties}", "{}")
                 })
@@ -190,7 +191,7 @@ impl VersionManager {
                             .replace("${assets_index_name}", asset_index)
                             .replace("${auth_uuid}", uuid)
                             .replace("${auth_access_token}", access_token)
-                            .replace("${user_type}", "msa")
+                            .replace("${user_type}", user_type)
                             .replace("${version_type}", &meta.version_type);
                         args.push(resolved);
                     }

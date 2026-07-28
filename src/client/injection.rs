@@ -289,12 +289,19 @@ impl GameLauncher {
 
         jvm_args.extend_from_slice(opts.custom_jvm_args);
 
+        let user_type = match opts.session.auth_type {
+            crate::launcher::auth::AuthType::ElyBy => "mojang",
+            crate::launcher::auth::AuthType::Microsoft => "msa",
+            crate::launcher::auth::AuthType::Local => "legacy",
+        };
+
         let mut game_args = version_manager.build_game_args(
             meta,
             &effective_game_dir,
             &opts.session.username,
             opts.session.effective_token(),
             &opts.session.uuid,
+            user_type,
         );
 
         if let (Some(w), Some(h)) = (opts.width, opts.height) {
