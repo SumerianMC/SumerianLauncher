@@ -1,8 +1,14 @@
 use anyhow::{Context, Result};
+use base64::Engine;
 use std::path::PathBuf;
 
 const PROFILE_URL: &str = "https://api.minecraftservices.com/minecraft/profile";
 const SKIN_URL: &str = "https://api.minecraftservices.com/minecraft/profile/skins";
+
+// ely.by skin API
+const ELY_PROFILE_URL: &str = "https://authserver.ely.by/api/user/profile";
+const ELY_SKIN_URL: &str = "https://skinsystem.ely.by/textures/";
+const ELY_SKIN_UPLOAD_URL: &str = "https://skinsystem.ely.by/api/skins";
 
 #[derive(serde::Deserialize)]
 pub struct MinecraftProfile {
@@ -17,6 +23,42 @@ pub struct SkinEntry {
     pub state: String,
     pub url: String,
     pub variant: String,
+}
+
+#[derive(serde::Deserialize)]
+struct ElyProfile {
+    id: String,
+    username: String,
+    properties: Vec<ElyProperty>,
+}
+
+#[derive(serde::Deserialize)]
+struct ElyProperty {
+    name: String,
+    value: String,
+}
+
+#[derive(serde::Deserialize)]
+struct ElyTextures {
+    textures: ElyTextureMap,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+struct ElyTextureMap {
+    #[serde(rename = "SKIN")]
+    skin: Option<ElyTexture>,
+}
+
+#[derive(serde::Deserialize)]
+struct ElyTexture {
+    url: String,
+    metadata: Option<ElyTextureMetadata>,
+}
+
+#[derive(serde::Deserialize)]
+struct ElyTextureMetadata {
+    model: Option<String>,
 }
 
 pub struct SkinManager {
@@ -35,6 +77,45 @@ impl SkinManager {
             .send().await?
             .json::<MinecraftProfile>().await
             .context("Failed to fetch Minecraft profile")
+    }
+
+    pub async fn get_profile_ely(&self, uuid: &str) -> Result<MinecraftProfile> {
+        let url = format!("{}/{}", ELY_PROFILE_URL, uuid);
+        let ely: ElyProfile = self.client
+            .get(&url)
+            .send().await?
+            .json::<ElyProfile>().await
+            .context("Failed to fetch ely.by profile")?;
+
+        // Decode the base64 textures property to get the skin URL
+        let textures_b64 = ely.properties.iter()
+            .find(|p| p.name == "textures")
+            .map(|p| p.value.as_str())
+            .unwrap_or("");
+
+        let skin_entry = if !textures_b64.is_empty() {
+            if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(textures_b64) {
+                if let Ok(tex) = serde_json::from_slice::<ElyTextures>(&decoded) {
+                    tex.textures.skin.map(|s| {
+                        let variant = s.metadata
+                            .and_then(|m| m.model)
+                            .unwrap_or_else(|| "classic".into());
+                        SkinEntry {
+                            id: String::new(),
+                            state: "ACTIVE".into(),
+                            url: s.url,
+                            variant,
+                        }
+                    })
+                } else { None }
+            } else { None }
+        } else { None };
+
+        Ok(MinecraftProfile {
+            id: ely.id,
+            name: ely.username,
+            skins: skin_entry.into_iter().collect(),
+        })
     }
 
     /// Upload a skin file (PNG). variant = "classic" or "slim"
@@ -62,6 +143,30 @@ impl SkinManager {
         Ok(())
     }
 
+    pub async fn upload_skin_ely(&self, access_token: &str, path: &PathBuf, variant: &str) -> Result<()> {
+        let bytes = tokio::fs::read(path).await.context("Failed to read skin file")?;
+        let filename = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+
+        let part = reqwest::multipart::Part::bytes(bytes)
+            .file_name(filename)
+            .mime_str("image/png")?;
+        let form = reqwest::multipart::Form::new()
+            .text("model", if variant == "slim" { "slim" } else { "" }.to_string())
+            .part("skin", part);
+
+        let resp = self.client
+            .post(ELY_SKIN_UPLOAD_URL)
+            .bearer_auth(access_token)
+            .multipart(form)
+            .send().await?;
+
+        if !resp.status().is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            anyhow::bail!("ely.by skin upload failed: {}", text);
+        }
+        Ok(())
+    }
+
     /// Reset skin back to the default Steve/Alex.
     pub async fn reset_skin(&self, access_token: &str, uuid: &str) -> Result<()> {
         let url = format!("https://api.minecraftservices.com/minecraft/profile/skins/active");
@@ -71,6 +176,17 @@ impl SkinManager {
             .send().await?;
         if !resp.status().is_success() {
             anyhow::bail!("Failed to reset skin (status {}). UUID: {}", resp.status(), uuid);
+        }
+        Ok(())
+    }
+
+    pub async fn reset_skin_ely(&self, access_token: &str) -> Result<()> {
+        let resp = self.client
+            .delete(ELY_SKIN_UPLOAD_URL)
+            .bearer_auth(access_token)
+            .send().await?;
+        if !resp.status().is_success() {
+            anyhow::bail!("ely.by skin reset failed (status {})", resp.status());
         }
         Ok(())
     }

@@ -1934,40 +1934,58 @@ async fn manage_skins(
 ) -> Result<()> {
     let session = pick_session(auth, profiles).await?;
     if session.auth_type == launcher::auth::AuthType::Local {
-        println!("  {} Skin management requires a Microsoft account.", style("✗").red());
+        println!("  {} Skin management requires a Microsoft or ely.by account.", style("✗").red());
         return Ok(());
     }
     let token = session.effective_token();
+    let is_ely = session.auth_type == launcher::auth::AuthType::ElyBy;
     let choice = Select::with_theme(&theme())
         .with_prompt("Skin Manager")
         .items(&["View current skin", "Upload skin", "Reset to default", "Back"])
         .default(0)
         .interact()?;
     match choice {
-        0 => match skin_mgr.get_profile(token).await {
-            Ok(p) => {
-                println!("  {} {}", style("Player:").dim(), style(&p.name).cyan());
-                if let Some(skin) = p.skins.iter().find(|s| s.state == "ACTIVE") {
-                    println!("  {} {}", style("Skin URL:").dim(), style(&skin.url).cyan());
-                    println!("  {} {}", style("Variant:").dim(), &skin.variant);
-                } else {
-                    println!("  No active skin found.");
+        0 => {
+            let profile = if is_ely {
+                skin_mgr.get_profile_ely(&session.uuid).await
+            } else {
+                skin_mgr.get_profile(token).await
+            };
+            match profile {
+                Ok(p) => {
+                    println!("  {} {}", style("Player:").dim(), style(&p.name).cyan());
+                    if let Some(skin) = p.skins.iter().find(|s| s.state == "ACTIVE") {
+                        println!("  {} {}", style("Skin URL:").dim(), style(&skin.url).cyan());
+                        println!("  {} {}", style("Variant:").dim(), &skin.variant);
+                    } else {
+                        println!("  No active skin found.");
+                    }
                 }
+                Err(e) => println!("  {} {}", style("✗").red(), e),
             }
-            Err(e) => println!("  {} {}", style("✗").red(), e),
-        },
+        }
         1 => {
             let path_str: String = Input::with_theme(&theme()).with_prompt("Path to skin PNG").interact_text()?;
             let variant_idx = Select::with_theme(&theme()).with_prompt("Skin variant").items(&["Classic (Steve)", "Slim (Alex)"]).default(0).interact()?;
             let variant = if variant_idx == 0 { "classic" } else { "slim" };
-            match skin_mgr.upload_skin(token, &PathBuf::from(path_str.trim()), variant).await {
+            let result = if is_ely {
+                skin_mgr.upload_skin_ely(token, &PathBuf::from(path_str.trim()), variant).await
+            } else {
+                skin_mgr.upload_skin(token, &PathBuf::from(path_str.trim()), variant).await
+            };
+            match result {
                 Ok(_)  => println!("  {} Skin uploaded.", style("✓").green()),
                 Err(e) => println!("  {} {}", style("✗").red(), e),
             }
         }
         2 => {
             if Confirm::with_theme(&theme()).with_prompt("Reset skin to default?").default(false).interact()? {
-                match skin_mgr.reset_skin(token, &session.uuid).await {
+                let result = if is_ely {
+                    skin_mgr.reset_skin_ely(token).await
+                } else {
+                    skin_mgr.reset_skin(token, &session.uuid).await
+                };
+                match result {
                     Ok(_)  => println!("  {} Skin reset.", style("✓").green()),
                     Err(e) => println!("  {} {}", style("✗").red(), e),
                 }
