@@ -28,6 +28,7 @@ const ELY_REFRESH_URL: &str = "https://authserver.ely.by/auth/refresh";
 const ELY_CLIENT_TOKEN: &str = "sumerian-client";
 // ely.by OAuth2 (for skin API)
 const ELY_OAUTH_CLIENT_ID: &str = "sumerian";
+const ELY_OAUTH_CLIENT_SECRET: &str = "YC6h_IxQ46vgasj29BuG_7-w4qdI2gZ8MHcatgRM9ymzTOyuGRxJRVThdtAPCuX";
 const ELY_OAUTH_SCOPE: &str = "account_info minecraft_server_session offline_access";
 const ELY_OAUTH_DEVICE_URL: &str = "https://account.ely.by/oauth2/v1/authorization/device";
 const ELY_OAUTH_TOKEN_URL: &str = "https://account.ely.by/api/oauth2/v1/token";
@@ -466,6 +467,7 @@ impl Authenticator {
                 .form(&[
                     ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
                     ("client_id", ELY_OAUTH_CLIENT_ID),
+                    ("client_secret", ELY_OAUTH_CLIENT_SECRET),
                     ("device_code", device_code),
                 ])
                 .send().await?
@@ -485,6 +487,7 @@ impl Authenticator {
             .form(&[
                 ("grant_type", "refresh_token"),
                 ("client_id", ELY_OAUTH_CLIENT_ID),
+                ("client_secret", ELY_OAUTH_CLIENT_SECRET),
                 ("refresh_token", refresh_token),
             ])
             .send().await?
