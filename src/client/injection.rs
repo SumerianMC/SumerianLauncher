@@ -282,9 +282,9 @@ impl GameLauncher {
         // Redirect Mojang auth API calls to ely.by when using an ely.by account
         if opts.session.auth_type == crate::launcher::auth::AuthType::ElyBy {
             jvm_args.push("-Dminecraft.api.auth.host=https://authserver.ely.by".into());
-            jvm_args.push("-Dminecraft.api.account.host=https://account.ely.by".into());
             jvm_args.push("-Dminecraft.api.session.host=https://sessionserver.ely.by".into());
             jvm_args.push("-Dminecraft.api.services.host=https://api.ely.by".into());
+            jvm_args.push("-Dminecraft.api.profiles.host=https://api.ely.by".into());
         }
 
         jvm_args.extend_from_slice(opts.custom_jvm_args);
