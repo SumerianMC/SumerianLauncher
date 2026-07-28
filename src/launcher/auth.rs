@@ -131,6 +131,11 @@ impl LocalProfile {
         Self { username, uuid }
     }
 
+    pub fn new_random(username: String) -> Self {
+        let uuid = uuid::Uuid::new_v4().as_hyphenated().to_string();
+        Self { username, uuid }
+    }
+
     pub fn to_session(&self) -> AuthSession {
         AuthSession {
             username: self.username.clone(),
@@ -177,6 +182,16 @@ impl ProfileManager {
             bail!("A local profile named '{}' already exists.", username);
         }
         let profile = LocalProfile::new(username.to_string());
+        profiles.push(profile.clone());
+        self.save_all(&profiles).await?;
+        Ok(profile)
+    }
+
+    pub async fn add_profile(&self, profile: LocalProfile) -> Result<LocalProfile> {
+        let mut profiles = self.load_all().await?;
+        if profiles.iter().any(|p| p.username.eq_ignore_ascii_case(&profile.username)) {
+            bail!("A local profile named '{}' already exists.", profile.username);
+        }
         profiles.push(profile.clone());
         self.save_all(&profiles).await?;
         Ok(profile)
@@ -666,5 +681,18 @@ impl Authenticator {
             .json::<McProfile>()
             .await
             .context("Failed to get Minecraft profile")
+    }
+
+    /// Returns Ok(true) if the token is valid, Ok(false) if expired/invalid, Err on network failure.
+    pub async fn validate_session(&self, session: &AuthSession) -> Result<bool> {
+        if session.auth_type != AuthType::Microsoft {
+            return Ok(true); // local/offline always valid
+        }
+        let resp = self.client
+            .get(MC_PROFILE_URL)
+            .bearer_auth(&session.access_token)
+            .send()
+            .await?;
+        Ok(resp.status().is_success())
     }
 }

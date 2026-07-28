@@ -1,6 +1,6 @@
 [package]
 name = "sumerian-client"
-version = "0.60.1"
+version = "0.61.0"
 edition = "2021"
 description = "A modern Rust Minecraft legacy client that brings old Minecraft versions into the future with shaders, textures, and optimization."
 authors = ["Sumerian Client"]

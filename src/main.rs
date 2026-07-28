@@ -14,7 +14,7 @@ use launcher::{
     backup::BackupManager,
     downloader::Downloader,
     history::{HistoryManager, LaunchRecord},
-    instances::{InstanceManager, InstanceProfile},
+    instances::{InstanceManager, InstanceProfile, WorldManager},
     loader,
     manifest::VersionManifest,
     mod_updates,
@@ -177,6 +177,7 @@ async fn main() -> Result<()> {
                 "Manage Mods",
                 "Check Mod Updates",
                 "Manage Skins",
+                "Manage Worlds",
                 "Screenshot Gallery",
                 "View Installed Versions",
                 "Launch History",
@@ -199,11 +200,12 @@ async fn main() -> Result<()> {
             9 => manage_mods(&mod_mgr, &instance_mgr, &version_mgr, &game).await?,
             10 => check_mod_updates(&http, &instance_mgr, &version_mgr, &game).await?,
             11 => manage_skins(&skin_mgr, &auth, &profiles).await?,
-            12 => screenshot_gallery(&instance_mgr, &game).await?,
-            13 => list_installed(&version_mgr).await?,
-            14 => view_launch_history(&history_mgr).await?,
-            15 => view_news(&http).await?,
-            16 => {
+            12 => manage_worlds(&instance_mgr, &game).await?,
+            13 => screenshot_gallery(&instance_mgr, &game).await?,
+            14 => list_installed(&version_mgr).await?,
+            15 => view_launch_history(&history_mgr).await?,
+            16 => view_news(&http).await?,
+            17 => {
                 println!("  Goodbye.");
                 break;
             }
@@ -430,7 +432,21 @@ async fn launch_game(
     warn_if_low_ram(&profile);
 
     // ── Account selection ────────────────────────────────────────────────────
-    let session = pick_session(auth, profiles).await?;
+    let mut session = pick_session(auth, profiles).await?;
+    // Session validation
+    if session.auth_type == AuthType::Microsoft {
+        print!("  {} Validating session... ", style("→").cyan());
+        match auth.validate_session(&session).await {
+            Ok(true) => println!("{}", style("✓").green()),
+            Ok(false) => {
+                println!("{}", style("expired").yellow());
+                println!("  {} Token expired — refreshing...", style("→").cyan());
+                session = auth.try_refresh(session).await;
+                println!("  {} Refreshed as {}", style("✓").green(), style(&session.username).cyan());
+            }
+            Err(e) => println!("{} ({})", style("skipped").dim(), e),
+        }
+    }
     println!(
         "  {} Playing as {} [{}]",
         style("✓").green(),
@@ -627,23 +643,26 @@ async fn pick_session(auth: &Authenticator, profiles: &ProfileManager) -> Result
             .with_prompt("Username")
             .validate_with(|s: &String| {
                 let s = s.trim();
-                if s.is_empty() {
-                    Err("Username cannot be empty.")
-                } else if s.len() > 16 {
-                    Err("Username must be 16 characters or fewer.")
-                } else if !s.chars().all(|c| c.is_alphanumeric() || c == '_') {
-                    Err("Only letters, numbers, and underscores allowed.")
-                } else {
-                    Ok(())
-                }
+                if s.is_empty() { Err("Username cannot be empty.") }
+                else if s.len() > 16 { Err("Username must be 16 characters or fewer.") }
+                else if !s.chars().all(|c| c.is_alphanumeric() || c == '_') { Err("Only letters, numbers, and underscores allowed.") }
+                else { Ok(()) }
             })
             .interact_text()?;
-        let profile = profiles.add(name.trim()).await?;
+        let uuid_choice = Select::with_theme(&theme())
+            .with_prompt("UUID type")
+            .items(&["Offline (deterministic, based on username)", "Random (new UUID each time)"])
+            .default(0)
+            .interact()?;
+        let profile = if uuid_choice == 0 {
+            launcher::auth::LocalProfile::new(name.trim().to_string())
+        } else {
+            launcher::auth::LocalProfile::new_random(name.trim().to_string())
+        };
+        profiles.add_profile(profile.clone()).await?;
         println!(
             "  {} Created local profile '{}' (UUID: {})",
-            style("✓").green(),
-            profile.username,
-            profile.uuid
+            style("✓").green(), profile.username, profile.uuid
         );
         return Ok(profile.to_session());
     }
@@ -705,18 +724,23 @@ async fn manage_accounts(
                     .with_prompt("Username")
                     .validate_with(|s: &String| {
                         let s = s.trim();
-                        if s.is_empty() {
-                            Err("Username cannot be empty.")
-                        } else if s.len() > 16 {
-                            Err("Username must be 16 characters or fewer.")
-                        } else if !s.chars().all(|c| c.is_alphanumeric() || c == '_') {
-                            Err("Only letters, numbers, and underscores allowed.")
-                        } else {
-                            Ok(())
-                        }
+                        if s.is_empty() { Err("Username cannot be empty.") }
+                        else if s.len() > 16 { Err("Username must be 16 characters or fewer.") }
+                        else if !s.chars().all(|c| c.is_alphanumeric() || c == '_') { Err("Only letters, numbers, and underscores allowed.") }
+                        else { Ok(()) }
                     })
                     .interact_text()?;
-                match profiles.add(name.trim()).await {
+                let uuid_choice = Select::with_theme(&theme())
+                    .with_prompt("UUID type")
+                    .items(&["Offline (deterministic, based on username)", "Random (new UUID each time)"])
+                    .default(0)
+                    .interact()?;
+                let profile = if uuid_choice == 0 {
+                    launcher::auth::LocalProfile::new(name.trim().to_string())
+                } else {
+                    launcher::auth::LocalProfile::new_random(name.trim().to_string())
+                };
+                match profiles.add_profile(profile).await {
                     Ok(p) => println!("  {} Added '{}' (UUID: {})", style("✓").green(), p.username, p.uuid),
                     Err(e) => println!("  {} {}", style("✗").red(), e),
                 }
@@ -878,7 +902,21 @@ async fn launch_preset(
     check_java_version(&meta, &http).await;
     warn_if_low_ram(&preset.optimization);
 
-    let session = pick_session(auth, profiles).await?;
+    let mut session = pick_session(auth, profiles).await?;
+    // Session validation
+    if session.auth_type == AuthType::Microsoft {
+        print!("  {} Validating session... ", style("→").cyan());
+        match auth.validate_session(&session).await {
+            Ok(true) => println!("{}", style("✓").green()),
+            Ok(false) => {
+                println!("{}", style("expired").yellow());
+                println!("  {} Token expired — refreshing...", style("→").cyan());
+                session = auth.try_refresh(session).await;
+                println!("  {} Refreshed as {}", style("✓").green(), style(&session.username).cyan());
+            }
+            Err(e) => println!("{} ({})", style("skipped").dim(), e),
+        }
+    }
     println!(
         "  {} Playing as {} [{}]",
         style("✓").green(),
@@ -1955,6 +1993,88 @@ async fn check_mod_updates(
                 Ok(_)  => println!("{}", style("✓").green()),
                 Err(e) => println!("{} {}", style("✗").red(), e),
             }
+        }
+    }
+    Ok(())
+}
+
+// ── World Manager ────────────────────────────────────────────────────────────
+
+async fn manage_worlds(
+    instance_mgr: &InstanceManager,
+    game_dir: &PathBuf,
+) -> Result<()> {
+    let instances = instance_mgr.load_all().await?;
+    let saves_dir = if instances.is_empty() {
+        game_dir.join("saves")
+    } else {
+        let mut labels: Vec<String> = vec!["Default game dir".into()];
+        labels.extend(instances.iter().map(|i| format!("{} [{}]", i.name, i.version_id)));
+        let i = Select::with_theme(&theme()).with_prompt("Worlds from").items(&labels).default(0).interact()?;
+        if i == 0 { game_dir.join("saves") } else { instance_mgr.instance_dir(&instances[i - 1].name).join("saves") }
+    };
+
+    loop {
+        let worlds = WorldManager::list(&saves_dir).await?;
+        println!();
+        println!("  {} Worlds ({}) — {}", style("◆").cyan(), worlds.len(), saves_dir.display());
+        for w in &worlds {
+            let played = w.last_played.as_deref().unwrap_or("unknown");
+            println!("  • {}  {}", style(&w.name).cyan(), style(played).dim());
+        }
+        println!();
+
+        let choice = Select::with_theme(&theme())
+            .with_prompt("World Manager")
+            .items(&["Rename world", "Delete world", "Export world (zip)", "Open saves folder", "Back"])
+            .default(0)
+            .interact()?;
+
+        if worlds.is_empty() && choice < 3 {
+            println!("  No worlds found.");
+            continue;
+        }
+
+        match choice {
+            0 => {
+                let labels: Vec<&str> = worlds.iter().map(|w| w.name.as_str()).collect();
+                let i = Select::with_theme(&theme()).with_prompt("Select world").items(&labels).default(0).interact()?;
+                let new_name: String = Input::with_theme(&theme())
+                    .with_prompt("New name")
+                    .validate_with(|s: &String| if s.trim().is_empty() { Err("Name cannot be empty.") } else { Ok(()) })
+                    .interact_text()?;
+                match WorldManager::rename(&saves_dir, &worlds[i].name, new_name.trim()).await {
+                    Ok(_)  => println!("  {} Renamed.", style("✓").green()),
+                    Err(e) => println!("  {} {}", style("✗").red(), e),
+                }
+            }
+            1 => {
+                let labels: Vec<&str> = worlds.iter().map(|w| w.name.as_str()).collect();
+                let i = Select::with_theme(&theme()).with_prompt("Select world").items(&labels).default(0).interact()?;
+                let confirm = Confirm::with_theme(&theme())
+                    .with_prompt(format!("Permanently delete '{}'?", worlds[i].name))
+                    .default(false).interact()?;
+                if confirm {
+                    match WorldManager::delete(&saves_dir, &worlds[i].name).await {
+                        Ok(_)  => println!("  {} Deleted.", style("✓").green()),
+                        Err(e) => println!("  {} {}", style("✗").red(), e),
+                    }
+                }
+            }
+            2 => {
+                let labels: Vec<&str> = worlds.iter().map(|w| w.name.as_str()).collect();
+                let i = Select::with_theme(&theme()).with_prompt("Select world").items(&labels).default(0).interact()?;
+                let dest: String = Input::with_theme(&theme())
+                    .with_prompt("Save zip to path")
+                    .with_initial_text(format!("{}.zip", worlds[i].name))
+                    .interact_text()?;
+                match WorldManager::export(&saves_dir, &worlds[i].name, &PathBuf::from(dest.trim())).await {
+                    Ok(_)  => println!("  {} Exported.", style("✓").green()),
+                    Err(e) => println!("  {} {}", style("✗").red(), e),
+                }
+            }
+            3 => { let _ = open::that(&saves_dir); }
+            _ => break,
         }
     }
     Ok(())

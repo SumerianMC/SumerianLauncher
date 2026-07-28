@@ -173,6 +173,68 @@ impl InstanceManager {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct WorldInfo {
+    pub name: String,
+    pub path: PathBuf,
+    pub last_played: Option<String>,
+}
+
+pub struct WorldManager;
+
+impl WorldManager {
+    pub async fn list(saves_dir: &PathBuf) -> Result<Vec<WorldInfo>> {
+        let mut worlds = Vec::new();
+        let Ok(mut dir) = fs::read_dir(saves_dir).await else {
+            return Ok(worlds);
+        };
+        while let Ok(Some(entry)) = dir.next_entry().await {
+            let path = entry.path();
+            if !path.is_dir() { continue; }
+            let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+            // Read level.dat modified time as last_played
+            let last_played = std::fs::metadata(path.join("level.dat"))
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .map(|t| {
+                    let dt: chrono::DateTime<chrono::Utc> = t.into();
+                    dt.format("%Y-%m-%d %H:%M").to_string()
+                });
+            worlds.push(WorldInfo { name, path, last_played });
+        }
+        worlds.sort_by(|a, b| b.last_played.cmp(&a.last_played));
+        Ok(worlds)
+    }
+
+    pub async fn rename(saves_dir: &PathBuf, old_name: &str, new_name: &str) -> Result<()> {
+        let old = saves_dir.join(old_name);
+        let new = saves_dir.join(new_name);
+        if !old.exists() { bail!("World '{}' not found.", old_name); }
+        if new.exists() { bail!("A world named '{}' already exists.", new_name); }
+        fs::rename(old, new).await?;
+        Ok(())
+    }
+
+    pub async fn delete(saves_dir: &PathBuf, name: &str) -> Result<()> {
+        let path = saves_dir.join(name);
+        if !path.exists() { bail!("World '{}' not found.", name); }
+        fs::remove_dir_all(path).await?;
+        Ok(())
+    }
+
+    pub async fn export(saves_dir: &PathBuf, name: &str, dest: &PathBuf) -> Result<()> {
+        let world_dir = saves_dir.join(name);
+        if !world_dir.exists() { bail!("World '{}' not found.", name); }
+        let file = std::fs::File::create(dest)?;
+        let mut zip = zip::ZipWriter::new(file);
+        let opts = zip::write::FileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        add_dir_to_zip(&mut zip, &world_dir, &world_dir, opts)?;
+        zip.finish()?;
+        Ok(())
+    }
+}
+
 fn add_dir_to_zip(
     zip: &mut zip::ZipWriter<std::fs::File>,
     base: &PathBuf,
