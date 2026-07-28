@@ -1937,6 +1937,30 @@ async fn manage_skins(
         println!("  {} Skin management requires a Microsoft or ely.by account.", style("✗").red());
         return Ok(());
     }
+
+    // For ely.by, explicitly refresh the token and surface any error
+    let session = if session.auth_type == launcher::auth::AuthType::ElyBy {
+        match session.refresh_token.as_ref() {
+            None => {
+                println!("  {} No refresh token stored. Please log in again via Manage Accounts.", style("✗").red());
+                return Ok(());
+            }
+            Some(_) => {
+                print!("  {} Refreshing ely.by token... ", style("→").cyan());
+                let refreshed = auth.try_refresh(session.clone()).await;
+                if refreshed.access_token == session.access_token {
+                    println!("{}", style("failed (token unchanged)").red());
+                    println!("  {} Token may be expired. Please log in again via Manage Accounts → Refresh ely.by token.", style("✗").red());
+                    return Ok(());
+                }
+                println!("{}", style("✓").green());
+                refreshed
+            }
+        }
+    } else {
+        session
+    };
+
     let token = session.effective_token();
     let is_ely = session.auth_type == launcher::auth::AuthType::ElyBy;
     let choice = Select::with_theme(&theme())
