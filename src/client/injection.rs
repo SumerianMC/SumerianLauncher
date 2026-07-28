@@ -102,10 +102,20 @@ pub async fn try_auto_install_java(
                     let mut zip = zip::ZipArchive::new(file)?;
                     zip.extract(dest_dir)?;
                 } else {
-                    let status = Command::new("tar")
-                        .args(["-xzf", archive_path.to_str().unwrap(), "-C", dest_dir.to_str().unwrap(), "--strip-components=1"])
-                        .status()?;
-                    if !status.success() { bail!("tar extraction failed"); }
+                    let file = std::fs::File::open(&archive_path)?;
+                    let gz = flate2::read::GzDecoder::new(file);
+                    let mut archive = tar::Archive::new(gz);
+                    archive.set_overwrite(true);
+                    // Strip the top-level JDK directory when extracting
+                    for entry in archive.entries()? {
+                        let mut entry = entry?;
+                        let path = entry.path()?.into_owned();
+                        let stripped = path.components().skip(1).collect::<std::path::PathBuf>();
+                        if stripped.as_os_str().is_empty() { continue; }
+                        let out = dest_dir.join(&stripped);
+                        if let Some(p) = out.parent() { std::fs::create_dir_all(p)?; }
+                        entry.unpack(&out)?;
+                    }
                 }
                 let _ = std::fs::remove_file(&archive_path);
 

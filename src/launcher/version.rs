@@ -127,7 +127,7 @@ impl VersionManager {
 
         args.push(format!(
             "-Djava.library.path={}",
-            natives_dir.to_string_lossy()
+            to_forward_slashes(natives_dir)
         ));
         args.push(format!(
             "-Dminecraft.launcher.brand=SumerianClient"
@@ -175,8 +175,8 @@ impl VersionManager {
                 .map(|s| {
                     s.replace("${auth_player_name}", username)
                         .replace("${version_name}", &meta.id)
-                        .replace("${game_directory}", &game_dir.to_string_lossy())
-                        .replace("${assets_root}", &assets_dir.to_string_lossy())
+                        .replace("${game_directory}", &to_forward_slashes(game_dir))
+                        .replace("${assets_root}", &to_forward_slashes(&assets_dir))
                         .replace("${assets_index_name}", asset_index)
                         .replace("${auth_uuid}", uuid)
                         .replace("${auth_access_token}", access_token)
@@ -196,8 +196,8 @@ impl VersionManager {
                         let resolved = s
                             .replace("${auth_player_name}", username)
                             .replace("${version_name}", &meta.id)
-                            .replace("${game_directory}", &game_dir.to_string_lossy())
-                            .replace("${assets_root}", &assets_dir.to_string_lossy())
+                            .replace("${game_directory}", &to_forward_slashes(game_dir))
+                            .replace("${assets_root}", &to_forward_slashes(&assets_dir))
                             .replace("${assets_index_name}", asset_index)
                             .replace("${auth_uuid}", uuid)
                             .replace("${auth_access_token}", access_token)
@@ -216,14 +216,18 @@ fn resolve_arg(s: &str, meta: &VersionMeta, game_dir: &Path, natives_dir: &Path)
     let assets_dir = game_dir.join("assets");
     s.replace(
         "${natives_directory}",
-        &natives_dir.to_string_lossy(),
+        &to_forward_slashes(natives_dir),
     )
     .replace("${launcher_name}", "SumerianClient")
     .replace("${launcher_version}", "0.1.0")
     .replace("${classpath}", "")
-    .replace("${assets_root}", &assets_dir.to_string_lossy())
-    .replace("${game_directory}", &game_dir.to_string_lossy())
+    .replace("${assets_root}", &to_forward_slashes(&assets_dir))
+    .replace("${game_directory}", &to_forward_slashes(game_dir))
     .replace("${version_name}", &meta.id)
+}
+
+fn to_forward_slashes(p: &Path) -> String {
+    p.to_string_lossy().replace('\\', "/")
 }
 
 pub fn maven_path(game_dir: &Path, name: &str) -> PathBuf {

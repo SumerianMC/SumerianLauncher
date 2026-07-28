@@ -222,12 +222,11 @@ pub async fn install_forge(
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 fn find_java() -> PathBuf {
-    // Prefer JAVA_HOME, then well-known paths, then PATH
-    if let Ok(home) = std::env::var("JAVA_HOME") {
-        let p = PathBuf::from(home).join("bin").join(if cfg!(windows) { "java.exe" } else { "java" });
-        if p.exists() { return p; }
-    }
-    PathBuf::from(if cfg!(windows) { "java.exe" } else { "java" })
+    // Delegate to the full discovery chain in injection.rs
+    crate::client::injection::find_java_for_major(21)
+        .or_else(|| crate::client::injection::find_java_for_major(17))
+        .or_else(|| crate::client::injection::find_java_for_major(8))
+        .unwrap_or_else(|| PathBuf::from("java"))
 }
 
 fn maven_path(game_dir: &Path, name: &str) -> PathBuf {

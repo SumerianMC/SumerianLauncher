@@ -1,6 +1,6 @@
 [package]
 name = "sumerian-client"
-version = "0.73.0"
+version = "0.74.0"
 edition = "2021"
 description = "A modern Rust Minecraft legacy client that brings old Minecraft versions into the future with shaders, textures, and optimization."
 authors = ["Sumerian Client"]
@@ -24,6 +24,8 @@ dialoguer = "0.11"
 console = "0.15"
 dirs = "5"
 zip = "0.6"
+flate2 = "1"
+tar = "0.4"
 tokio-util = { version = "0.7", features = ["io"] }
 open = "5"
 chrono = { version = "0.4", features = ["serde"] }
