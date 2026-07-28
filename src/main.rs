@@ -192,6 +192,7 @@ async fn main() -> Result<()> {
             lang.menu_news.as_str(),
             "Server Browser",
             "Install Modpack",
+            "Playtime",
             "Settings",
             "Language / Idioma / Langue",
             lang.menu_exit.as_str(),
@@ -222,8 +223,9 @@ async fn main() -> Result<()> {
             16 => view_news(&http).await?,
             17 => server_browser_menu(&server_browser).await?,
             18 => install_modpack(&modpack_installer, &instance_mgr, &version_mgr).await?,
-            19 => settings_menu(&config_mgr).await?,
-            20 => {
+            19 => view_playtime(&history_mgr).await?,
+            20 => settings_menu(&config_mgr).await?,
+            21 => {
                 let all = Lang::all();
                 let names: Vec<&str> = all.iter().map(|l| l.name.as_str()).collect();
                 let cur = all.iter().position(|l| l.code == lang.code).unwrap_or(0);
@@ -236,7 +238,7 @@ async fn main() -> Result<()> {
                 let _ = save_lang(&base, &lang.code);
                 println!("  {} Language set to {}", style("✓").green(), style(&lang.name).cyan());
             }
-            21 => {
+            22 => {
                 println!("  {}", lang.goodbye);
                 break;
             }
@@ -2495,5 +2497,79 @@ async fn screenshot_gallery(
             Err(e) => println!("  {} {}", style("✗").red(), e),
         }
     }
+    Ok(())
+}
+
+// ── Playtime Tracker ──────────────────────────────────────────────────────────
+
+async fn view_playtime(history_mgr: &HistoryManager) -> Result<()> {
+    use launcher::playtime::{bar, fmt_duration, week_label, PlaytimeTracker};
+
+    let tracker = PlaytimeTracker::new(history_mgr);
+    let s = tracker.summary().await?;
+
+    if s.total_secs == 0 {
+        println!("  No playtime recorded yet.");
+        return Ok(());
+    }
+
+    println!();
+    println!("  {} Playtime Summary", style("◆").cyan());
+    println!();
+    println!(
+        "  Total playtime   : {}",
+        style(fmt_duration(s.total_secs)).cyan().bold()
+    );
+    println!(
+        "  This week        : {}",
+        style(fmt_duration(s.this_week_secs)).green()
+    );
+
+    // ── By version ────────────────────────────────────────────────────────────
+    if !s.by_version.is_empty() {
+        println!();
+        println!("  {} By version:", style("◆").cyan());
+        let max = s.by_version[0].1;
+        for (ver, secs) in s.by_version.iter().take(8) {
+            println!(
+                "    {:<18} {} {}",
+                style(ver).cyan(),
+                bar(*secs, max, 20),
+                style(fmt_duration(*secs)).dim()
+            );
+        }
+    }
+
+    // ── By account ────────────────────────────────────────────────────────────
+    if !s.by_account.is_empty() {
+        println!();
+        println!("  {} By account:", style("◆").cyan());
+        let max = s.by_account[0].1;
+        for (acc, secs) in s.by_account.iter().take(5) {
+            println!(
+                "    {:<18} {} {}",
+                style(acc).cyan(),
+                bar(*secs, max, 20),
+                style(fmt_duration(*secs)).dim()
+            );
+        }
+    }
+
+    // ── Weekly chart ─────────────────────────────────────────────────────────
+    if !s.weekly.is_empty() {
+        println!();
+        println!("  {} Weekly (last {} weeks):", style("◆").cyan(), s.weekly.len());
+        let max = s.weekly.iter().map(|(_, v)| *v).max().unwrap_or(1);
+        for ((year, week), secs) in &s.weekly {
+            println!(
+                "    {:<10} {} {}",
+                style(week_label(*year, *week)).dim(),
+                bar(*secs, max, 24),
+                style(fmt_duration(*secs)).dim()
+            );
+        }
+    }
+
+    println!();
     Ok(())
 }

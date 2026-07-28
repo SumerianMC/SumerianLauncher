@@ -12,6 +12,7 @@ pub mod mod_updates;
 pub mod modpacks;
 pub mod mods;
 pub mod news;
+pub mod playtime;
 pub mod presets;
 pub mod screenshots;
 pub mod servers;
