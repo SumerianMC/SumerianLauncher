@@ -22,6 +22,11 @@ const CLIENT_ID: &str = "00000000402b5328";
 const SCOPE: &str = "service::user.auth.xboxlive.com::MBI_SSL";
 const MS_REFRESH_URL: &str = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token";
 
+// ely.by auth endpoints
+const ELY_AUTH_URL: &str = "https://authserver.ely.by/auth/authenticate";
+const ELY_REFRESH_URL: &str = "https://authserver.ely.by/auth/refresh";
+const ELY_CLIENT_TOKEN: &str = "sumerian-client";
+
 /// Offline UUID namespace — matches what vanilla offline mode uses:
 /// UUID v3 of "OfflinePlayer:<username>" in the DNS namespace.
 const OFFLINE_NS: uuid::Uuid = uuid::Uuid::from_bytes([
@@ -40,6 +45,7 @@ fn offline_uuid(username: &str) -> String {
 pub enum AuthType {
     Microsoft,
     Local,
+    ElyBy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,6 +71,32 @@ impl AuthSession {
             &self.access_token
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct ElyAuthResponse {
+    #[serde(rename = "accessToken")]
+    access_token: String,
+    #[serde(rename = "clientToken")]
+    client_token: String,
+    #[serde(rename = "selectedProfile")]
+    selected_profile: ElyProfile,
+}
+
+#[derive(Debug, Deserialize)]
+struct ElyProfile {
+    id: String,
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ElyRefreshResponse {
+    #[serde(rename = "accessToken")]
+    access_token: String,
+    #[serde(rename = "clientToken")]
+    client_token: String,
+    #[serde(rename = "selectedProfile")]
+    selected_profile: ElyProfile,
 }
 
 /// A saved local (offline) profile.
@@ -241,18 +273,22 @@ impl Authenticator {
     }
 
     pub async fn try_refresh(&self, session: AuthSession) -> AuthSession {
-        if session.auth_type != AuthType::Microsoft {
-            return session;
-        }
-        let Some(ref rt) = session.refresh_token else {
-            return session;
-        };
-        match self.refresh_ms_token(rt).await {
-            Ok(new_session) => {
-                let _ = self.save_session(&new_session).await;
-                new_session
+        match session.auth_type {
+            AuthType::Microsoft => {
+                let Some(ref rt) = session.refresh_token else { return session; };
+                match self.refresh_ms_token(rt).await {
+                    Ok(new_session) => { let _ = self.save_session(&new_session).await; new_session }
+                    Err(_) => session,
+                }
             }
-            Err(_) => session,
+            AuthType::ElyBy => {
+                let Some(ref rt) = session.refresh_token else { return session; };
+                match self.refresh_ely_token(&session.access_token, rt).await {
+                    Ok(new_session) => { let _ = self.save_session(&new_session).await; new_session }
+                    Err(_) => session,
+                }
+            }
+            AuthType::Local => session,
         }
     }
 
@@ -297,6 +333,56 @@ impl Authenticator {
             serde_json::to_string_pretty(session)?,
         ).await?;
         Ok(())
+    }
+
+    /// Authenticate with ely.by using username + password.
+    pub async fn authenticate_ely_by(&self, username: &str, password: &str) -> Result<AuthSession> {
+        let body = serde_json::json!({
+            "username": username,
+            "password": password,
+            "clientToken": ELY_CLIENT_TOKEN,
+            "requestUser": true
+        });
+        let resp = self
+            .client
+            .post(ELY_AUTH_URL)
+            .json(&body)
+            .send()
+            .await?
+            .json::<ElyAuthResponse>()
+            .await
+            .context("ely.by authentication failed")?;
+        Ok(AuthSession {
+            username: resp.selected_profile.name,
+            uuid: resp.selected_profile.id,
+            access_token: resp.access_token,
+            refresh_token: Some(resp.client_token),
+            auth_type: AuthType::ElyBy,
+        })
+    }
+
+    async fn refresh_ely_token(&self, access_token: &str, client_token: &str) -> Result<AuthSession> {
+        let body = serde_json::json!({
+            "accessToken": access_token,
+            "clientToken": client_token,
+            "requestUser": true
+        });
+        let resp = self
+            .client
+            .post(ELY_REFRESH_URL)
+            .json(&body)
+            .send()
+            .await?
+            .json::<ElyRefreshResponse>()
+            .await
+            .context("ely.by token refresh failed")?;
+        Ok(AuthSession {
+            username: resp.selected_profile.name,
+            uuid: resp.selected_profile.id,
+            access_token: resp.access_token,
+            refresh_token: Some(resp.client_token),
+            auth_type: AuthType::ElyBy,
+        })
     }
 
     pub async fn remove_session(&self, uuid: &str) -> Result<()> {

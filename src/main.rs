@@ -438,6 +438,7 @@ async fn launch_game(
         match session.auth_type {
             AuthType::Local => style("local").yellow(),
             AuthType::Microsoft => style("microsoft").blue(),
+            AuthType::ElyBy => style("ely.by").magenta(),
         }
     );
 
@@ -454,12 +455,6 @@ async fn launch_game(
         game_dir_override,
     };
     let mut child = launcher.launch(&meta, &opts, version_mgr)?;
-
-    println!(
-        "  {} Game launched (PID {}). Waiting for exit...",
-        style("✓").green(),
-        child.id()
-    );
     let mut discord = DiscordPresence::new();
     discord.connect();
     discord.set_playing(&meta.id, &session.username);
@@ -602,11 +597,19 @@ async fn pick_session(auth: &Authenticator, profiles: &ProfileManager) -> Result
     for p in &local {
         labels.push(format!("  {} [local]", p.username));
     }
+    let ely_accounts: Vec<_> = auth.load_all_sessions().await
+        .into_iter()
+        .filter(|s| s.auth_type == AuthType::ElyBy)
+        .collect();
     for s in &ms_accounts {
         labels.push(format!("  {} [microsoft]", s.username));
     }
+    for s in &ely_accounts {
+        labels.push(format!("  {} [ely.by]", s.username));
+    }
     labels.push("  Add local profile".into());
     labels.push("  Log in with Microsoft".into());
+    labels.push("  Log in with ely.by".into());
 
     let idx = Select::with_theme(&theme())
         .with_prompt("Select account")
@@ -616,6 +619,7 @@ async fn pick_session(auth: &Authenticator, profiles: &ProfileManager) -> Result
 
     let local_count = local.len();
     let ms_count = ms_accounts.len();
+    let ely_count = ely_accounts.len();
 
     if idx < local_count {
         return Ok(local[idx].to_session());
@@ -623,12 +627,18 @@ async fn pick_session(auth: &Authenticator, profiles: &ProfileManager) -> Result
     let ms_start = local_count;
     if idx < ms_start + ms_count {
         let session = ms_accounts.into_iter().nth(idx - ms_start).unwrap();
-        // Auto-refresh the token before returning
         let session = auth.try_refresh(session).await;
         return Ok(session);
     }
-    let add_local_idx = ms_start + ms_count;
+    let ely_start = ms_start + ms_count;
+    if idx < ely_start + ely_count {
+        let session = ely_accounts.into_iter().nth(idx - ely_start).unwrap();
+        let session = auth.try_refresh(session).await;
+        return Ok(session);
+    }
+    let add_local_idx = ely_start + ely_count;
     let ms_login_idx  = add_local_idx + 1;
+    let ely_login_idx = add_local_idx + 2;
 
     if idx == add_local_idx {
         let name: String = Input::with_theme(&theme())
@@ -660,11 +670,17 @@ async fn pick_session(auth: &Authenticator, profiles: &ProfileManager) -> Result
         println!("  {} Starting Microsoft login...", style("→").cyan());
         let session = auth.authenticate().await?;
         auth.save_session(&session).await?;
-        println!(
-            "  {} Logged in as {}",
-            style("✓").green(),
-            style(&session.username).cyan()
-        );
+        println!("  {} Logged in as {}", style("✓").green(), style(&session.username).cyan());
+        return Ok(session);
+    }
+
+    if idx == ely_login_idx {
+        let email: String = Input::with_theme(&theme()).with_prompt("ely.by email").interact_text()?;
+        let password: String = dialoguer::Password::with_theme(&theme()).with_prompt("ely.by password").interact()?;
+        println!("  {} Authenticating with ely.by...", style("→").cyan());
+        let session = auth.authenticate_ely_by(email.trim(), password.trim()).await?;
+        auth.save_session(&session).await?;
+        println!("  {} Logged in as {}", style("✓").green(), style(&session.username).cyan());
         return Ok(session);
     }
 
@@ -684,10 +700,14 @@ async fn manage_accounts(
             .into_iter()
             .filter(|s| s.auth_type == AuthType::Microsoft)
             .collect();
+        let ely_accounts: Vec<_> = auth.load_all_sessions().await
+            .into_iter()
+            .filter(|s| s.auth_type == AuthType::ElyBy)
+            .collect();
 
         println!();
         println!("  {} Accounts", style("◆").cyan());
-        if local.is_empty() && ms_accounts.is_empty() {
+        if local.is_empty() && ms_accounts.is_empty() && ely_accounts.is_empty() {
             println!("  No accounts configured.");
         }
         for p in &local {
@@ -695,6 +715,9 @@ async fn manage_accounts(
         }
         for s in &ms_accounts {
             println!("  • {} [microsoft]  uuid: {}", style(&s.username).blue(), s.uuid);
+        }
+        for s in &ely_accounts {
+            println!("  • {} [ely.by]  uuid: {}", style(&s.username).magenta(), s.uuid);
         }
         println!();
 
@@ -707,6 +730,9 @@ async fn manage_accounts(
                 "Log in with Microsoft (add account)",
                 "Refresh Microsoft token",
                 "Remove Microsoft account",
+                "Log in with ely.by (add account)",
+                "Refresh ely.by token",
+                "Remove ely.by account",
                 "Back",
             ])
             .default(0)
@@ -798,6 +824,39 @@ async fn manage_accounts(
                     .default(false).interact()?;
                 if confirm {
                     auth.remove_session(&ms_accounts[i].uuid).await?;
+                    println!("  {} Removed.", style("✓").green());
+                }
+            }
+            6 => {
+                let email: String = Input::with_theme(&theme()).with_prompt("ely.by email").interact_text()?;
+                let password: String = dialoguer::Password::with_theme(&theme()).with_prompt("ely.by password").interact()?;
+                println!("  {} Authenticating with ely.by...", style("→").cyan());
+                match auth.authenticate_ely_by(email.trim(), password.trim()).await {
+                    Ok(session) => {
+                        auth.save_session(&session).await?;
+                        println!("  {} Logged in as {}", style("✓").green(), style(&session.username).cyan());
+                    }
+                    Err(e) => println!("  {} {}", style("✗").red(), e),
+                }
+            }
+            7 => {
+                if ely_accounts.is_empty() { println!("  No ely.by accounts saved."); continue; }
+                let labels: Vec<String> = ely_accounts.iter().map(|s| format!("{} ({})", s.username, &s.uuid[..8])).collect();
+                let i = Select::with_theme(&theme()).with_prompt("Select account to refresh").items(&labels).default(0).interact()?;
+                let session = ely_accounts[i].clone();
+                println!("  {} Refreshing token for {}...", style("→").cyan(), session.username);
+                let refreshed = auth.try_refresh(session).await;
+                println!("  {} Token refreshed for {}.", style("✓").green(), refreshed.username);
+            }
+            8 => {
+                if ely_accounts.is_empty() { println!("  No ely.by accounts to remove."); continue; }
+                let labels: Vec<String> = ely_accounts.iter().map(|s| format!("{} ({})", s.username, &s.uuid[..8])).collect();
+                let i = Select::with_theme(&theme()).with_prompt("Select account to remove").items(&labels).default(0).interact()?;
+                let confirm = Confirm::with_theme(&theme())
+                    .with_prompt(format!("Remove ely.by account '{}'?", ely_accounts[i].username))
+                    .default(false).interact()?;
+                if confirm {
+                    auth.remove_session(&ely_accounts[i].uuid).await?;
                     println!("  {} Removed.", style("✓").green());
                 }
             }
@@ -899,6 +958,7 @@ async fn launch_preset(
         match session.auth_type {
             AuthType::Local => style("local").yellow(),
             AuthType::Microsoft => style("microsoft").blue(),
+            AuthType::ElyBy => style("ely.by").magenta(),
         }
     );
 
@@ -1873,7 +1933,7 @@ async fn manage_skins(
     profiles: &ProfileManager,
 ) -> Result<()> {
     let session = pick_session(auth, profiles).await?;
-    if session.auth_type != launcher::auth::AuthType::Microsoft {
+    if session.auth_type == launcher::auth::AuthType::Local {
         println!("  {} Skin management requires a Microsoft account.", style("✗").red());
         return Ok(());
     }
