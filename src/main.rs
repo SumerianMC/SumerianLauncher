@@ -257,7 +257,7 @@ async fn install_version(
     _game_dir: &PathBuf,
 ) -> Result<()> {
     println!("  {} Fetching version manifest...", style("→").cyan());
-    let manifest = VersionManifest::fetch(http).await?;
+    let manifest = VersionManifest::fetch_with_cache(http, Some(&config_dir())).await?;
 
     let type_names = ["release", "snapshot", "old_beta", "old_alpha"];
     let type_labels = ["Release", "Snapshot", "Beta", "Alpha / Classic"];

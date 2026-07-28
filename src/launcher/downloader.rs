@@ -9,6 +9,11 @@ use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Semaphore;
 
+/// Max concurrent asset downloads.
+const ASSET_CONCURRENCY: usize = 64;
+/// Max concurrent library downloads.
+const LIB_CONCURRENCY: usize = 16;
+
 use crate::launcher::manifest::{
     AssetIndex, AssetObject, AssetObjects, Artifact, VersionMeta,
 };
@@ -50,38 +55,71 @@ impl Downloader {
     }
 
     pub async fn download_libraries(&self, meta: &VersionMeta) -> Result<Vec<PathBuf>> {
-        let mut paths = Vec::new();
+        // Collect all (artifact, dest_path, is_native) tuples first
+        struct LibTask {
+            artifact: crate::launcher::manifest::Artifact,
+            path: PathBuf,
+            is_native: bool,
+        }
+        let mut tasks: Vec<LibTask> = Vec::new();
         for lib in &meta.libraries {
-            if !lib.is_allowed_on_current_os() {
-                continue;
-            }
-            let Some(downloads) = &lib.downloads else {
-                continue;
-            };
-
-            // Main artifact
+            if !lib.is_allowed_on_current_os() { continue; }
+            let Some(downloads) = &lib.downloads else { continue; };
             if let Some(artifact) = &downloads.artifact {
-                let path = self.library_path_from_name(&lib.name);
-                self.download_artifact(artifact, &path, &lib.name).await?;
-                paths.push(path);
+                tasks.push(LibTask {
+                    artifact: artifact.clone(),
+                    path: self.library_path_from_name(&lib.name),
+                    is_native: false,
+                });
             }
-
-            // Natives
             if let Some(classifier_key) = lib.native_classifier() {
                 if let Some(classifiers) = &downloads.classifiers {
                     if let Some(native_artifact) = classifiers.get(&classifier_key) {
-                        let path = self.library_path_from_name(&format!(
-                            "{}-{}",
-                            lib.name, classifier_key
-                        ));
-                        self.download_artifact(native_artifact, &path, &lib.name)
-                            .await?;
-                        self.extract_natives(&path, meta).await?;
-                        paths.push(path);
+                        tasks.push(LibTask {
+                            artifact: native_artifact.clone(),
+                            path: self.library_path_from_name(&format!("{}-{}", lib.name, classifier_key)),
+                            is_native: true,
+                        });
                     }
                 }
             }
         }
+
+        let pb = self.multi.add(ProgressBar::new(tasks.len() as u64));
+        pb.set_style(progress_style());
+        pb.set_message("Downloading libraries");
+
+        let sem = Arc::new(Semaphore::new(LIB_CONCURRENCY));
+        let client = self.client.clone();
+        let multi = self.multi.clone();
+        let version_id = meta.id.clone();
+        let game_dir = self.game_dir.clone();
+
+        let mut handles = Vec::new();
+        for task in tasks {
+            let sem = sem.clone();
+            let client = client.clone();
+            let multi = multi.clone();
+            let version_id = version_id.clone();
+            let game_dir = game_dir.clone();
+            handles.push(tokio::spawn(async move {
+                let _permit = sem.acquire().await.unwrap();
+                // Inline download to avoid borrowing self
+                download_artifact_standalone(&client, &multi, &task.artifact, &task.path, "").await?;
+                if task.is_native {
+                    extract_natives_standalone(&task.path, &game_dir, &version_id).await?;
+                }
+                Ok::<PathBuf, anyhow::Error>(task.path)
+            }));
+        }
+
+        let mut paths = Vec::new();
+        for h in handles {
+            let path = h.await??;
+            paths.push(path);
+            pb.inc(1);
+        }
+        pb.finish_with_message("Libraries downloaded");
         Ok(paths)
     }
 
@@ -106,17 +144,33 @@ impl Downloader {
         let content = fs::read_to_string(&index_path).await?;
         let objects: AssetObjects = serde_json::from_str(&content)?;
 
-        let pb = self.multi.add(ProgressBar::new(objects.objects.len() as u64));
-        pb.set_style(progress_style());
-        pb.set_message("Downloading assets");
-
-        let sem = Arc::new(Semaphore::new(32));
-        let mut tasks = Vec::new();
+        // Filter to only assets that are actually missing or corrupt
+        let base = self.game_dir.join("assets").join("objects");
+        let mut needed: Vec<(String, AssetObject)> = Vec::new();
         for (name, obj) in &objects.objects {
-            let obj = obj.clone();
-            let name = name.clone();
+            let dest = base.join(&obj.hash[..2]).join(&obj.hash);
+            // Fast path: if size matches, skip SHA1 check
+            let already_ok = tokio::fs::metadata(&dest).await
+                .map(|m| m.len() == obj.size)
+                .unwrap_or(false);
+            if !already_ok {
+                needed.push((name.clone(), obj.clone()));
+            }
+        }
+
+        if needed.is_empty() {
+            return Ok(());
+        }
+
+        let pb = self.multi.add(ProgressBar::new(needed.len() as u64));
+        pb.set_style(progress_style());
+        pb.set_message(format!("Downloading {} assets", needed.len()));
+
+        let sem = Arc::new(Semaphore::new(ASSET_CONCURRENCY));
+        let mut tasks = Vec::new();
+        for (name, obj) in needed {
             let client = self.client.clone();
-            let base = self.game_dir.join("assets").join("objects");
+            let base = base.clone();
             let sem = sem.clone();
             tasks.push(tokio::spawn(async move {
                 let _permit = sem.acquire().await.unwrap();
@@ -128,36 +182,12 @@ impl Downloader {
             task.await??;
             pb.inc(1);
         }
-        pb.finish_with_message("Assets downloaded");
+        pb.finish_with_message("Assets up to date");
         Ok(())
     }
 
     pub async fn extract_natives(&self, zip_path: &Path, meta: &VersionMeta) -> Result<()> {
-        let natives_dir = self
-            .game_dir
-            .join("versions")
-            .join(&meta.id)
-            .join("natives");
-        fs::create_dir_all(&natives_dir).await?;
-
-        let zip_data = fs::read(zip_path).await?;
-        let cursor = std::io::Cursor::new(zip_data);
-        let mut archive = zip::ZipArchive::new(cursor)?;
-
-        for i in 0..archive.len() {
-            let mut file = archive.by_index(i)?;
-            let name = file.name().to_string();
-            if name.ends_with('/') || name.starts_with("META-INF") {
-                continue;
-            }
-            let out_path = natives_dir.join(&name);
-            if let Some(parent) = out_path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            let mut out = std::fs::File::create(&out_path)?;
-            std::io::copy(&mut file, &mut out)?;
-        }
-        Ok(())
+        extract_natives_standalone(zip_path, &self.game_dir, &meta.id).await
     }
 
     pub async fn download_artifact(
@@ -257,11 +287,6 @@ async fn download_asset_object(
     let prefix = &obj.hash[..2];
     let dest = base.join(prefix).join(&obj.hash);
 
-    // Verify existing file — re-download if missing or corrupt
-    if dest.exists() && verify_sha1(&dest, &obj.hash).await.unwrap_or(false) {
-        return Ok(());
-    }
-
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent).await?;
     }
@@ -276,15 +301,85 @@ async fn download_asset_object(
         bail!("Asset download failed: HTTP {} for {}", resp.status(), obj.hash);
     }
 
-    let bytes = resp.bytes().await?;
+    // Stream directly to disk while hashing — no full-file buffer
+    let mut file = fs::File::create(&dest).await?;
+    let mut stream = resp.bytes_stream();
     let mut hasher = Sha1::new();
-    hasher.update(&bytes);
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        hasher.update(&chunk);
+        file.write_all(&chunk).await?;
+    }
+    file.flush().await?;
+    drop(file);
+
     let computed = hex::encode(hasher.finalize());
     if computed != obj.hash {
+        fs::remove_file(&dest).await.ok();
         bail!("Asset SHA1 mismatch: expected {}, got {}", obj.hash, computed);
     }
+    Ok(())
+}
 
-    fs::write(&dest, &bytes).await?;
+/// Standalone artifact downloader (no &self borrow needed for parallel tasks).
+async fn download_artifact_standalone(
+    client: &Client,
+    multi: &MultiProgress,
+    artifact: &crate::launcher::manifest::Artifact,
+    dest: &Path,
+    label: &str,
+) -> Result<()> {
+    if dest.exists() && verify_sha1(dest, &artifact.sha1).await? {
+        return Ok(());
+    }
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent).await?;
+    }
+    let pb = multi.add(ProgressBar::new(artifact.size));
+    pb.set_style(progress_style());
+    if !label.is_empty() { pb.set_message(format!("Downloading {}", label)); }
+
+    let resp = client.get(&artifact.url).send().await
+        .with_context(|| format!("GET {} failed", artifact.url))?;
+    if !resp.status().is_success() {
+        bail!("HTTP {} for {}", resp.status(), artifact.url);
+    }
+    let mut file = fs::File::create(dest).await?;
+    let mut stream = resp.bytes_stream();
+    let mut hasher = Sha1::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        hasher.update(&chunk);
+        file.write_all(&chunk).await?;
+        pb.inc(chunk.len() as u64);
+    }
+    file.flush().await?;
+    drop(file);
+    pb.finish_and_clear();
+
+    let computed = hex::encode(hasher.finalize());
+    if computed != artifact.sha1 {
+        fs::remove_file(dest).await.ok();
+        bail!("SHA1 mismatch for {}: expected {}, got {}", artifact.url, artifact.sha1, computed);
+    }
+    Ok(())
+}
+
+async fn extract_natives_standalone(zip_path: &Path, game_dir: &Path, version_id: &str) -> Result<()> {
+    let natives_dir = game_dir.join("versions").join(version_id).join("natives");
+    fs::create_dir_all(&natives_dir).await?;
+    let zip_data = fs::read(zip_path).await?;
+    let cursor = std::io::Cursor::new(zip_data);
+    let mut archive = zip::ZipArchive::new(cursor)?;
+    for i in 0..archive.len() {
+        let mut file = archive.by_index(i)?;
+        let name = file.name().to_string();
+        if name.ends_with('/') || name.starts_with("META-INF") { continue; }
+        let out_path = natives_dir.join(&name);
+        if let Some(parent) = out_path.parent() { std::fs::create_dir_all(parent)?; }
+        let mut out = std::fs::File::create(&out_path)?;
+        std::io::copy(&mut file, &mut out)?;
+    }
     Ok(())
 }
 

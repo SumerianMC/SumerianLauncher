@@ -26,30 +26,40 @@ impl VersionManager {
     }
 
     pub async fn list_installed(&self) -> Result<Vec<InstalledVersion>> {
-        let mut installed = Vec::new();
         let mut dir = match fs::read_dir(&self.versions_dir).await {
             Ok(d) => d,
-            Err(_) => return Ok(installed),
+            Err(_) => return Ok(Vec::new()),
         };
 
+        // Collect all candidate dirs first, then read their JSON in parallel
+        let mut candidates: Vec<(String, PathBuf, PathBuf)> = Vec::new();
         while let Some(entry) = dir.next_entry().await? {
             let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
+            if !path.is_dir() { continue; }
             let id = path.file_name().unwrap().to_string_lossy().to_string();
             let jar = path.join(format!("{}.jar", id));
             let meta = path.join(format!("{}.json", id));
             if jar.exists() && meta.exists() {
-                let raw = fs::read_to_string(&meta).await?;
+                candidates.push((id, jar, meta));
+            }
+        }
+
+        let handles: Vec<_> = candidates.into_iter().map(|(id, jar, meta_path)| {
+            tokio::spawn(async move {
+                let raw = fs::read_to_string(&meta_path).await?;
                 let version_meta: VersionMeta = serde_json::from_str(&raw)?;
-                installed.push(InstalledVersion {
+                Ok::<InstalledVersion, anyhow::Error>(InstalledVersion {
                     id,
                     version_type: version_meta.version_type,
                     jar_path: jar,
-                    meta_path: meta,
-                });
-            }
+                    meta_path,
+                })
+            })
+        }).collect();
+
+        let mut installed = Vec::with_capacity(handles.len());
+        for h in handles {
+            installed.push(h.await??);
         }
         Ok(installed)
     }

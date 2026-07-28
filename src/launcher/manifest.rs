@@ -1,9 +1,13 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::PathBuf;
+use tokio::fs;
 
 const MANIFEST_URL: &str =
     "https://piston-meta.mojang.com/mc/game/version_manifest.json";
+/// Re-fetch the manifest at most once every 5 minutes.
+const MANIFEST_CACHE_SECS: u64 = 300;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct VersionManifest {
@@ -128,13 +132,45 @@ pub struct AssetObject {
 
 impl VersionManifest {
     pub async fn fetch(client: &reqwest::Client) -> Result<Self> {
+        Self::fetch_with_cache(client, None).await
+    }
+
+    /// Fetch the manifest, using a local cache file to avoid redundant network
+    /// requests within the same launcher session (TTL = MANIFEST_CACHE_SECS).
+    pub async fn fetch_with_cache(
+        client: &reqwest::Client,
+        cache_dir: Option<&PathBuf>,
+    ) -> Result<Self> {
+        if let Some(dir) = cache_dir {
+            let cache_path = dir.join("manifest_cache.json");
+            if let Ok(meta) = tokio::fs::metadata(&cache_path).await {
+                let age = meta.modified().ok()
+                    .and_then(|t| t.elapsed().ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(u64::MAX);
+                if age < MANIFEST_CACHE_SECS {
+                    if let Ok(raw) = fs::read_to_string(&cache_path).await {
+                        if let Ok(m) = serde_json::from_str::<VersionManifest>(&raw) {
+                            return Ok(m);
+                        }
+                    }
+                }
+            }
+            let manifest = client
+                .get(MANIFEST_URL)
+                .send().await
+                .context("Failed to fetch version manifest")?
+                .json::<VersionManifest>().await
+                .context("Failed to parse version manifest")?;
+            let _ = fs::create_dir_all(dir).await;
+            let _ = fs::write(&cache_path, serde_json::to_string(&manifest).unwrap_or_default()).await;
+            return Ok(manifest);
+        }
         let manifest = client
             .get(MANIFEST_URL)
-            .send()
-            .await
+            .send().await
             .context("Failed to fetch version manifest")?
-            .json::<VersionManifest>()
-            .await
+            .json::<VersionManifest>().await
             .context("Failed to parse version manifest")?;
         Ok(manifest)
     }
