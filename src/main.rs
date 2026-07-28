@@ -85,7 +85,7 @@ fn print_banner() {
     println!(
         "  {} {}",
         style("Sumerian Client").cyan().bold(),
-        style("v0.1.0 — Minecraft Legacy Launcher").dim()
+        style(format!("v{} — Minecraft Legacy Launcher", env!("CARGO_PKG_VERSION"))).dim()
     );
     println!();
 }
@@ -139,7 +139,7 @@ async fn main() -> Result<()> {
     std::fs::create_dir_all(&config)?;
 
     let http = reqwest::Client::builder()
-        .user_agent("SumerianClient/0.1.0")
+        .user_agent(concat!("SumerianClient/", env!("CARGO_PKG_VERSION")))
         .build()?;
 
     let texture_mgr = TextureManager::new(&base);
