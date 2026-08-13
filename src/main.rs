@@ -11,33 +11,44 @@ use std::path::PathBuf;
 
 use client::injection::{GameLauncher, LaunchOptions, detect_java_major, find_java_for_major, java_download_url, try_auto_install_java};
 use launcher::{
+    advancements,
     auth::{AuthSession, AuthType, Authenticator, ProfileManager},
     backup::BackupManager,
     benchmark,
     config::ConfigManager,
+    configexport,
     conflicts,
+    crashpatterns::CrashPatternManager,
     downloader::Downloader,
     friends::{Friend, FriendList},
     history::{HistoryManager, LaunchRecord},
+    instancediff,
     instances::{InstanceManager, InstanceProfile, WorldManager},
-    loader,
-    manifest::VersionManifest,
+    jvmadvisor,
+    lanscanner,
+    leakdetector,
+    loader,    manifest::VersionManifest,
     mod_updates,
     modpacks::ModpackInstaller,
     mods::ModManager,
     news,
     portforward,
     presets::{LaunchPreset, PresetManager},
+    realms,
+    recording,
     screenshots::ScreenshotGallery,
     servers::ServerBrowser,
     skins::SkinManager,
+    splashscreen,
+    servermanager,
+    tips,
     trending,
     updater,
     version::VersionManager,
     discord::DiscordPresence,
     webhook::{self, WebhookEvent},
-};
-use lang::{Lang, load_lang, save_lang};
+    worldinfo,
+};use lang::{Lang, load_lang, save_lang};
 use optimizer::OptimizationProfile;
 
 use renderer::{
@@ -177,37 +188,52 @@ async fn main() -> Result<()> {
     let modpack_installer = ModpackInstaller::new(http.clone());
     let config_mgr = ConfigManager::new(&base);
     let friend_list = FriendList::new(&base);
+    let crash_pattern_mgr = CrashPatternManager::new(&base);
     let mut lang = load_lang(&base);
+
+    // Print a startup tip below the banner
+    println!("  {} {}", style("Tip:").cyan().bold(), style(tips::tip_of_the_session()).dim());
+    println!();
 
     loop {
         let menu_items: Vec<&str> = vec![
-            lang.menu_install_version.as_str(),
-            lang.menu_install_mod_loader.as_str(),
-            lang.menu_launch_game.as_str(),
-            lang.menu_launch_preset.as_str(),
-            lang.menu_manage_presets.as_str(),
-            lang.menu_manage_accounts.as_str(),
-            lang.menu_manage_textures.as_str(),
-            lang.menu_manage_shaders.as_str(),
-            lang.menu_manage_instances.as_str(),
-            lang.menu_manage_mods.as_str(),
-            lang.menu_check_mod_updates.as_str(),
-            lang.menu_manage_skins.as_str(),
-            lang.menu_manage_worlds.as_str(),
-            lang.menu_screenshot_gallery.as_str(),
-            lang.menu_view_installed.as_str(),
-            lang.menu_launch_history.as_str(),
-            lang.menu_news.as_str(),
-            "Server Browser",
-            "Install Modpack",
-            "Playtime",
-            "Friends",
-            "Trending Mods",
-            "Resource Pack Wizard",
-            "Port Forwarding Helper",
-            "Settings",
-            "Language / Idioma / Langue",
-            lang.menu_exit.as_str(),
+            lang.menu_install_version.as_str(),       // 0
+            lang.menu_install_mod_loader.as_str(),    // 1
+            lang.menu_launch_game.as_str(),           // 2
+            lang.menu_launch_preset.as_str(),         // 3
+            lang.menu_manage_presets.as_str(),        // 4
+            lang.menu_manage_accounts.as_str(),       // 5
+            lang.menu_manage_textures.as_str(),       // 6
+            lang.menu_manage_shaders.as_str(),        // 7
+            lang.menu_manage_instances.as_str(),      // 8
+            lang.menu_manage_mods.as_str(),           // 9
+            lang.menu_check_mod_updates.as_str(),     // 10
+            lang.menu_manage_skins.as_str(),          // 11
+            lang.menu_manage_worlds.as_str(),         // 12
+            lang.menu_screenshot_gallery.as_str(),    // 13
+            lang.menu_view_installed.as_str(),        // 14
+            lang.menu_launch_history.as_str(),        // 15
+            lang.menu_news.as_str(),                  // 16
+            "Server Browser",                         // 17
+            "Install Modpack",                        // 18
+            "Playtime",                               // 19
+            "Friends",                                // 20
+            "Trending Mods",                          // 21
+            "Resource Pack Wizard",                   // 22
+            "Port Forwarding Helper",                 // 23
+            "Realm Browser",                          // 24
+            "Advancement Tracker",                    // 25
+            "LAN World Scanner",                      // 26
+            "Whitelist & Op Manager",                 // 27
+            "JVM Flag Advisor",                       // 28
+            "Crash Pattern Report",                   // 29
+            "Instance Diff",                          // 30
+            "Recording Helper",                       // 31
+            "Splash Screen Editor",                   // 32
+            "Config Export / Import",                 // 33
+            "Settings",                               // 34
+            "Language / Idioma / Langue",             // 35
+            lang.menu_exit.as_str(),                  // 36
         ];
         let choice = Select::with_theme(&theme())
             .with_prompt("Main Menu")
@@ -218,8 +244,8 @@ async fn main() -> Result<()> {
         match choice {
             0  => install_version(&http, &downloader, &version_mgr, &game).await?,
             1  => install_mod_loader(&http, &version_mgr, &game).await?,
-            2  => launch_game(&http, &downloader, &auth, &profiles, &version_mgr, &texture_mgr, &shader_mgr, &history_mgr, &instance_mgr, &backup_mgr, &config_mgr, &game).await?,
-            3  => launch_preset(&http, &downloader, &auth, &profiles, &preset_mgr, &version_mgr, &texture_mgr, &shader_mgr, &history_mgr, &instance_mgr, &backup_mgr, &config_mgr, &game).await?,
+            2  => launch_game(&http, &downloader, &auth, &profiles, &version_mgr, &texture_mgr, &shader_mgr, &history_mgr, &instance_mgr, &backup_mgr, &config_mgr, &crash_pattern_mgr, &game).await?,
+            3  => launch_preset(&http, &downloader, &auth, &profiles, &preset_mgr, &version_mgr, &texture_mgr, &shader_mgr, &history_mgr, &instance_mgr, &backup_mgr, &config_mgr, &crash_pattern_mgr, &game).await?,
             4  => manage_presets(&preset_mgr, &version_mgr, &texture_mgr, &shader_mgr).await?,
             5  => manage_accounts(&auth, &profiles, &base).await?,
             6  => manage_textures(&texture_mgr, &game).await?,
@@ -229,7 +255,7 @@ async fn main() -> Result<()> {
             10 => check_mod_updates(&http, &instance_mgr, &version_mgr, &game).await?,
             11 => manage_skins(&skin_mgr, &auth, &profiles).await?,
             12 => manage_worlds(&instance_mgr, &game).await?,
-            13 => screenshot_gallery(&instance_mgr, &game).await?,
+            13 => screenshot_gallery(&http, &instance_mgr, &game).await?,
             14 => list_installed(&version_mgr).await?,
             15 => view_launch_history(&history_mgr).await?,
             16 => view_news(&http).await?,
@@ -240,8 +266,18 @@ async fn main() -> Result<()> {
             21 => trending_mods_menu(&http, &version_mgr).await?,
             22 => resource_pack_wizard(&texture_mgr).await?,
             23 => port_forwarding_menu(&game).await?,
-            24 => settings_menu(&config_mgr).await?,
-            25 => {
+            24 => realm_browser_menu(&http, &auth, &profiles, &version_mgr).await?,
+            25 => advancement_tracker_menu(&instance_mgr, &game).await?,
+            26 => lan_world_scanner_menu().await?,
+            27 => whitelist_op_menu(&instance_mgr, &game).await?,
+            28 => jvm_advisor_menu(&version_mgr).await?,
+            29 => crash_pattern_report_menu(&crash_pattern_mgr).await?,
+            30 => instance_diff_menu(&instance_mgr).await?,
+            31 => recording_helper_menu(&instance_mgr, &game).await?,
+            32 => splash_screen_editor_menu(&texture_mgr).await?,
+            33 => config_export_import_menu(&base).await?,
+            34 => settings_menu(&config_mgr).await?,
+            35 => {
                 let all = Lang::all();
                 let names: Vec<&str> = all.iter().map(|l| l.name.as_str()).collect();
                 let cur = all.iter().position(|l| l.code == lang.code).unwrap_or(0);
@@ -254,7 +290,7 @@ async fn main() -> Result<()> {
                 let _ = save_lang(&base, &lang.code);
                 println!("  {} Language set to {}", style("✓").green(), style(&lang.name).cyan());
             }
-            26 => {
+            36 => {
                 println!("  {}", lang.goodbye);
                 break;
             }
@@ -346,6 +382,7 @@ async fn launch_game(
     instance_mgr: &InstanceManager,
     backup_mgr: &BackupManager,
     config_mgr: &ConfigManager,
+    crash_pattern_mgr: &CrashPatternManager,
     game_dir: &PathBuf,
 ) -> Result<()> {
     // List installed versions
@@ -573,7 +610,7 @@ async fn launch_game(
     let duration_secs = start.elapsed().as_secs();
     let exit_code = status.code();
 
-    // Collect benchmark stats
+    // Collect benchmark stats + leak detection
     let bench_stats = benchmark_handle.map(|h| h.finish());
     if let Some(ref s) = bench_stats {
         if let Some(avg) = s.fps_avg() {
@@ -587,6 +624,12 @@ async fn launch_game(
         }
         if let Some(peak) = s.peak_heap_mb() {
             println!("  {} Peak heap: {} MB", style("◆").cyan(), style(peak).yellow());
+        }
+        // Leak detection
+        if let Some(report) = leakdetector::analyse(s, duration_secs) {
+            if report.suspected {
+                println!("  {} Memory leak suspected: {}", style("⚠").red().bold(), report.message);
+            }
         }
     }
 
@@ -965,6 +1008,7 @@ async fn launch_preset(
     instance_mgr: &InstanceManager,
     backup_mgr: &BackupManager,
     config_mgr: &ConfigManager,
+    _crash_pattern_mgr: &CrashPatternManager,
     game_dir: &PathBuf,
 ) -> Result<()> {
     let presets = preset_mgr.load_all().await?;
@@ -2678,47 +2722,9 @@ async fn settings_menu(config_mgr: &ConfigManager) -> Result<()> {
     Ok(())
 }
 
-// ── Screenshot Gallery ────────────────────────────────────────────────────────
+// ── Screenshot Gallery (with clipboard/upload) ───────────────────────────────
 
-async fn screenshot_gallery(
-    instance_mgr: &InstanceManager,
-    game_dir: &PathBuf,
-) -> Result<()> {
-    let instances = instance_mgr.load_all().await?;
-    let dir = if instances.is_empty() {
-        game_dir.clone()
-    } else {
-        let mut labels: Vec<String> = vec!["Default game dir".into()];
-        labels.extend(instances.iter().map(|i| i.name.clone()));
-        let i = Select::with_theme(&theme()).with_prompt("Screenshots from").items(&labels).default(0).interact()?;
-        if i == 0 { game_dir.clone() } else { instance_mgr.instance_dir(&instances[i - 1].name) }
-    };
-    let shots = ScreenshotGallery::list(&dir).await?;
-    if shots.is_empty() {
-        println!("  No screenshots found in {}", dir.join("screenshots").display());
-        return Ok(());
-    }
-    let mut labels: Vec<String> = shots.iter()
-        .map(|p| p.file_name().unwrap_or_default().to_string_lossy().to_string())
-        .collect();
-    labels.push("Open folder".into());
-    labels.push("Back".into());
-    println!();
-    println!("  {} Screenshots ({})", style("◆").cyan(), shots.len());
-    println!();
-    let idx = Select::with_theme(&theme()).with_prompt("Select screenshot").items(&labels).default(0).interact()?;
-    if idx == shots.len() {
-        let _ = ScreenshotGallery::open_folder(&dir);
-    } else if idx < shots.len() {
-        match ScreenshotGallery::open(&shots[idx]) {
-            Ok(_)  => println!("  {} Opened.", style("✓").green()),
-            Err(e) => println!("  {} {}", style("✗").red(), e),
-        }
-    }
-    Ok(())
-}
 
-// ── Playtime Tracker ──────────────────────────────────────────────────────────
 
 async fn view_playtime(history_mgr: &HistoryManager) -> Result<()> {
     use launcher::playtime::{bar, fmt_duration, week_label, PlaytimeTracker};
@@ -3121,6 +3127,656 @@ async fn port_forwarding_menu(game_dir: &PathBuf) -> Result<()> {
             let _ = open::that("https://playit.gg/download");
         }
         _ => {}
+    }
+    Ok(())
+}
+
+// ── Realm Browser ────────────────────────────────────────────────────────────
+
+async fn realm_browser_menu(
+    http: &reqwest::Client,
+    auth: &Authenticator,
+    profiles: &ProfileManager,
+    version_mgr: &VersionManager,
+) -> Result<()> {
+    let session = pick_session(auth, profiles).await?;
+    if session.auth_type != launcher::auth::AuthType::Microsoft {
+        println!("  {} Realm Browser requires a Microsoft account.", style("✗").red());
+        return Ok(());
+    }
+
+    let installed = version_mgr.list_installed().await?;
+    let game_version = installed.first().map(|v| v.id.as_str()).unwrap_or("1.21").to_string();
+
+    println!("  {} Fetching Realms...", style("→").cyan());
+    let realm_list = match realms::list_realms(
+        http,
+        session.effective_token(),
+        &session.uuid,
+        &session.username,
+        &game_version,
+    ).await {
+        Ok(r) => r,
+        Err(e) => { println!("  {} {}", style("✗").red(), e); return Ok(()); }
+    };
+
+    if realm_list.is_empty() {
+        println!("  No active Realms found for this account.");
+        return Ok(());
+    }
+
+    println!();
+    println!("  {} Your Realms ({})", style("◆").cyan(), realm_list.len());
+    let labels: Vec<String> = realm_list.iter().map(|r| {
+        let state = if r.state == "OPEN" { style("open").green() } else { style("closed").dim() };
+        format!("{} [{}] — {} ({})", r.name, state, r.owner, r.motd.as_deref().unwrap_or(""))
+    }).collect();
+
+    let mut items = labels.iter().map(|s| s.as_str()).collect::<Vec<_>>();
+    items.push("Back");
+
+    let choice = Select::with_theme(&theme())
+        .with_prompt("Select Realm to get join address")
+        .items(&items)
+        .default(0)
+        .interact()?;
+
+    if choice >= realm_list.len() { return Ok(()); }
+
+    let realm = &realm_list[choice];
+    println!("  {} Fetching join address...", style("→").cyan());
+    match realms::get_address(http, session.effective_token(), realm.id, &game_version).await {
+        Ok(addr) => {
+            println!("  {} Realm address: {}", style("✓").green(), style(&addr).cyan());
+            println!("  {} Use this address in 'Launch Game' → server quick-join, or add it to Server Browser.", style("ℹ").cyan());
+        }
+        Err(e) => println!("  {} {}", style("✗").red(), e),
+    }
+    Ok(())
+}
+
+// ── Advancement Tracker ───────────────────────────────────────────────────────
+
+async fn advancement_tracker_menu(
+    instance_mgr: &InstanceManager,
+    game_dir: &PathBuf,
+) -> Result<()> {
+    let instances = instance_mgr.load_all().await?;
+    let saves_dir = if instances.is_empty() {
+        game_dir.join("saves")
+    } else {
+        let mut labels = vec!["Default game dir".to_string()];
+        labels.extend(instances.iter().map(|i| format!("{} [{}]", i.name, i.version_id)));
+        let i = Select::with_theme(&theme()).with_prompt("Saves from").items(&labels).default(0).interact()?;
+        if i == 0 { game_dir.join("saves") } else { instance_mgr.instance_dir(&instances[i - 1].name).join("saves") }
+    };
+
+    // List worlds
+    let worlds = WorldManager::list(&saves_dir).await?;
+    if worlds.is_empty() { println!("  No worlds found."); return Ok(()); }
+
+    let world_labels: Vec<&str> = worlds.iter().map(|w| w.name.as_str()).collect();
+    let wi = Select::with_theme(&theme()).with_prompt("Select world").items(&world_labels).default(0).interact()?;
+    let world_dir = &worlds[wi].path;
+
+    let adv_path = match advancements::find_latest_advancements(world_dir) {
+        Some(p) => p,
+        None => { println!("  No advancements file found (1.12+ worlds only)."); return Ok(()); }
+    };
+
+    let cats = match advancements::parse_advancements(&adv_path) {
+        Ok(c) => c,
+        Err(e) => { println!("  {} Failed to parse advancements: {}", style("✗").red(), e); return Ok(()); }
+    };
+
+    let total_done: usize = cats.iter().map(|c| c.done).sum();
+    let total_all: usize  = cats.iter().map(|c| c.total).sum();
+
+    println!();
+    println!("  {} Advancements — {}", style("◆").cyan(), worlds[wi].name);
+    println!("  Overall: {}/{} ({:.0}%)", style(total_done).green(), total_all, if total_all > 0 { total_done as f64 / total_all as f64 * 100.0 } else { 0.0 });
+    println!();
+    for cat in &cats {
+        let filled = if cat.total > 0 { (cat.done as f64 / cat.total as f64 * 20.0) as usize } else { 0 };
+        let bar = format!("{}{}", "█".repeat(filled), "░".repeat(20 - filled));
+        println!("  {:<30} {} {}/{}", style(&cat.namespace).cyan(), bar, cat.done, cat.total);
+    }
+    Ok(())
+}
+
+// ── LAN World Scanner ─────────────────────────────────────────────────────────
+
+async fn lan_world_scanner_menu() -> Result<()> {
+    println!();
+    println!("  {} LAN World Scanner", style("◆").cyan());
+    println!("  Scanning for open LAN worlds on your local network (4 seconds)...");
+    println!();
+
+    let worlds = match tokio::task::spawn_blocking(lanscanner::scan).await? {
+        Ok(w) => w,
+        Err(e) => { println!("  {} Scan failed: {}", style("✗").red(), e); return Ok(()); }
+    };
+
+    if worlds.is_empty() {
+        println!("  No LAN worlds found. Make sure someone has opened their world to LAN in Minecraft.");
+        return Ok(());
+    }
+
+    println!("  {} Found {} LAN world(s):", style("◆").cyan(), worlds.len());
+    println!();
+    for (i, w) in worlds.iter().enumerate() {
+        println!("  {}. {} — {}", i + 1, style(&w.motd).cyan(), style(&w.address).green());
+    }
+    println!();
+    println!("  {} Use the address above as the server address in 'Launch Game' or 'Server Browser'.", style("ℹ").cyan());
+    Ok(())
+}
+
+// ── Whitelist & Op Manager ────────────────────────────────────────────────────
+
+async fn whitelist_op_menu(
+    instance_mgr: &InstanceManager,
+    game_dir: &PathBuf,
+) -> Result<()> {
+    let instances = instance_mgr.load_all().await?;
+    let server_dir = if instances.is_empty() {
+        game_dir.clone()
+    } else {
+        let mut labels = vec!["Default game dir".to_string()];
+        labels.extend(instances.iter().map(|i| format!("{} [{}]", i.name, i.version_id)));
+        let i = Select::with_theme(&theme()).with_prompt("Server directory").items(&labels).default(0).interact()?;
+        if i == 0 { game_dir.clone() } else { instance_mgr.instance_dir(&instances[i - 1].name) }
+    };
+
+    loop {
+        let whitelist = servermanager::load_whitelist(&server_dir).await.unwrap_or_default();
+        let ops = servermanager::load_ops(&server_dir).await.unwrap_or_default();
+
+        println!();
+        println!("  {} Whitelist ({}) | Ops ({})", style("◆").cyan(), whitelist.len(), ops.len());
+        println!();
+
+        let choice = Select::with_theme(&theme())
+            .with_prompt("Whitelist & Op Manager")
+            .items(&[
+                "List whitelist",
+                "Add to whitelist",
+                "Remove from whitelist",
+                "List ops",
+                "Add op",
+                "Remove op",
+                "Back",
+            ])
+            .default(0)
+            .interact()?;
+
+        match choice {
+            0 => {
+                if whitelist.is_empty() { println!("  Whitelist is empty."); }
+                for e in &whitelist { println!("  • {} ({})", style(&e.name).cyan(), &e.uuid[..8]); }
+            }
+            1 => {
+                let name: String = Input::with_theme(&theme()).with_prompt("Player name").interact_text()?;
+                let uuid: String = Input::with_theme(&theme()).with_prompt("UUID (leave blank to use offline UUID)").allow_empty(true).interact_text()?;
+                let effective_uuid = if uuid.trim().is_empty() {
+                    format!("{:x}", uuid::Uuid::new_v3(&uuid::Uuid::NAMESPACE_DNS, format!("OfflinePlayer:{}", name.trim()).as_bytes()))
+                } else { uuid.trim().to_string() };
+                match servermanager::add_whitelist(&server_dir, name.trim(), &effective_uuid).await {
+                    Ok(_) => println!("  {} Added.", style("✓").green()),
+                    Err(e) => println!("  {} {}", style("✗").red(), e),
+                }
+            }
+            2 => {
+                if whitelist.is_empty() { println!("  Whitelist is empty."); continue; }
+                let names: Vec<&str> = whitelist.iter().map(|e| e.name.as_str()).collect();
+                let i = Select::with_theme(&theme()).with_prompt("Remove player").items(&names).default(0).interact()?;
+                match servermanager::remove_whitelist(&server_dir, &whitelist[i].name).await {
+                    Ok(_) => println!("  {} Removed.", style("✓").green()),
+                    Err(e) => println!("  {} {}", style("✗").red(), e),
+                }
+            }
+            3 => {
+                if ops.is_empty() { println!("  No ops."); }
+                for e in &ops { println!("  • {} (level {}) ({})", style(&e.name).cyan(), e.level, &e.uuid[..8]); }
+            }
+            4 => {
+                let name: String = Input::with_theme(&theme()).with_prompt("Player name").interact_text()?;
+                let uuid: String = Input::with_theme(&theme()).with_prompt("UUID (blank = offline UUID)").allow_empty(true).interact_text()?;
+                let effective_uuid = if uuid.trim().is_empty() {
+                    format!("{:x}", uuid::Uuid::new_v3(&uuid::Uuid::NAMESPACE_DNS, format!("OfflinePlayer:{}", name.trim()).as_bytes()))
+                } else { uuid.trim().to_string() };
+                let level_idx = Select::with_theme(&theme()).with_prompt("Op level").items(&["1 — Bypass spawn protection", "2 — Commands + singleplayer", "3 — Kick/ban/op", "4 — Full operator"]).default(1).interact()?;
+                match servermanager::add_op(&server_dir, name.trim(), &effective_uuid, level_idx as u8 + 1).await {
+                    Ok(_) => println!("  {} Added.", style("✓").green()),
+                    Err(e) => println!("  {} {}", style("✗").red(), e),
+                }
+            }
+            5 => {
+                if ops.is_empty() { println!("  No ops."); continue; }
+                let names: Vec<&str> = ops.iter().map(|e| e.name.as_str()).collect();
+                let i = Select::with_theme(&theme()).with_prompt("Remove op").items(&names).default(0).interact()?;
+                match servermanager::remove_op(&server_dir, &ops[i].name).await {
+                    Ok(_) => println!("  {} Removed.", style("✓").green()),
+                    Err(e) => println!("  {} {}", style("✗").red(), e),
+                }
+            }
+            _ => break,
+        }
+    }
+    Ok(())
+}
+
+// ── JVM Flag Advisor ──────────────────────────────────────────────────────────
+
+async fn jvm_advisor_menu(version_mgr: &VersionManager) -> Result<()> {
+    use client::injection::VersionEra;
+
+    let installed = version_mgr.list_installed().await?;
+    let java_major = if installed.is_empty() {
+        21u32
+    } else {
+        let labels: Vec<String> = installed.iter().map(|v| format!("{} [{}]", v.id, v.version_type)).collect();
+        let i = Select::with_theme(&theme()).with_prompt("Version to advise for").items(&labels).default(0).interact()?;
+        let meta = version_mgr.load_meta(&installed[i].id).await?;
+        let era = VersionEra::detect(&meta.id, &meta.version_type, &meta);
+        if era.requires_java8() { 8 } else { meta.java_version.as_ref().map(|j| j.major_version).unwrap_or(21) }
+    };
+
+    let opt_list = OptimizationProfile::all();
+    let opt_labels: Vec<String> = opt_list.iter().map(|p| format!("{} — {}", p, p.description())).collect();
+    let o_idx = Select::with_theme(&theme()).with_prompt("Optimization profile").items(&opt_labels).default(2).interact()?;
+    let profile = OptimizationProfile::from_index(o_idx);
+
+    let advice = jvmadvisor::advise(java_major, &profile);
+
+    println!();
+    println!("  {} JVM Flag Advisor — Java {} / {}", style("◆").cyan(), java_major, profile);
+    println!();
+    for fa in &advice.flags {
+        println!("  {} {}", style("•").green(), style(&fa.flag).cyan());
+        println!("    {}", style(&fa.reason).dim());
+        println!();
+    }
+    println!("  {} Copyable flags:", style("◆").cyan());
+    println!();
+    println!("  {}", style(&advice.command_line).cyan());
+    println!();
+    println!("  {} Paste these into Settings → Java path → Custom JVM args, or an instance profile.", style("ℹ").cyan());
+    Ok(())
+}
+
+// ── Crash Pattern Report ──────────────────────────────────────────────────────
+
+async fn crash_pattern_report_menu(mgr: &launcher::crashpatterns::CrashPatternManager) -> Result<()> {
+    let store = mgr.load().await;
+
+    println!();
+    println!("  {} Crash Pattern Report", style("◆").cyan());
+    println!("  Total crashes recorded: {}", style(store.total_crashes).yellow());
+    println!();
+
+    if store.total_crashes == 0 {
+        println!("  No crashes recorded yet.");
+        return Ok(());
+    }
+
+    let suspects = store.top_suspects(10);
+    if !suspects.is_empty() {
+        println!("  {} Top suspected mods (by crash co-occurrence):", style("◆").cyan());
+        for (mod_fragment, count) in &suspects {
+            println!("    {} {} — {} crash(es)", style("•").red(), style(mod_fragment).cyan(), count);
+        }
+        println!();
+    }
+
+    let causes = store.top_causes(8);
+    if !causes.is_empty() {
+        println!("  {} Most common crash causes:", style("◆").cyan());
+        for (cause, count) in &causes {
+            println!("    {} {} — {} time(s)", style("•").yellow(), cause, count);
+        }
+        println!();
+    }
+
+    let choice = Select::with_theme(&theme())
+        .with_prompt("Crash Pattern Report")
+        .items(&["Reset all patterns", "Back"])
+        .default(1)
+        .interact()?;
+
+    if choice == 0 {
+        let confirm = Confirm::with_theme(&theme())
+            .with_prompt("Reset all crash pattern data?")
+            .default(false)
+            .interact()?;
+        if confirm {
+            mgr.reset().await?;
+            println!("  {} Reset.", style("✓").green());
+        }
+    }
+    Ok(())
+}
+
+// ── Instance Diff ─────────────────────────────────────────────────────────────
+
+async fn instance_diff_menu(instance_mgr: &InstanceManager) -> Result<()> {
+    let instances = instance_mgr.load_all().await?;
+    if instances.len() < 2 {
+        println!("  You need at least 2 instances to compare.");
+        return Ok(());
+    }
+
+    let labels: Vec<String> = instances.iter().map(|i| format!("{} [{}]", i.name, i.version_id)).collect();
+
+    let a_idx = Select::with_theme(&theme()).with_prompt("Instance A").items(&labels).default(0).interact()?;
+    let b_idx = Select::with_theme(&theme()).with_prompt("Instance B").items(&labels).default(1).interact()?;
+
+    if a_idx == b_idx {
+        println!("  Select two different instances.");
+        return Ok(());
+    }
+
+    let dir_a = instance_mgr.instance_dir(&instances[a_idx].name);
+    let dir_b = instance_mgr.instance_dir(&instances[b_idx].name);
+    let report = instancediff::diff(&dir_a, &dir_b);
+
+    println!();
+    println!(
+        "  {} Instance Diff: {} vs {}",
+        style("◆").cyan(),
+        style(&instances[a_idx].name).cyan(),
+        style(&instances[b_idx].name).cyan()
+    );
+    println!("  Shared mods: {}", style(report.shared_mod_count).green());
+    println!();
+
+    if report.mod_diffs.is_empty() {
+        println!("  No mod differences found.");
+    } else {
+        println!("  {} Mod differences ({}):", style("◆").cyan(), report.mod_diffs.len());
+        for d in &report.mod_diffs {
+            if d.only_in_a {
+                println!("    {} {} — only in {}", style("A").cyan().bold(), d.name, instances[a_idx].name);
+            } else if d.only_in_b {
+                println!("    {} {} — only in {}", style("B").cyan().bold(), d.name, instances[b_idx].name);
+            } else if d.version_mismatch {
+                println!("    {} {} — version mismatch", style("≠").yellow(), d.name);
+                println!("       A: {}  B: {}",
+                    d.version_a.as_deref().unwrap_or("?"),
+                    d.version_b.as_deref().unwrap_or("?"));
+            }
+        }
+    }
+
+    if !report.config_diffs.is_empty() {
+        println!();
+        println!("  {} Config differences ({}):", style("◆").cyan(), report.config_diffs.len());
+        for d in &report.config_diffs {
+            if d.only_in_a {
+                println!("    {} {} — only in {}", style("A").cyan().bold(), d.filename, instances[a_idx].name);
+            } else {
+                println!("    {} {} — only in {}", style("B").cyan().bold(), d.filename, instances[b_idx].name);
+            }
+        }
+    }
+    Ok(())
+}
+
+// ── Recording Helper ──────────────────────────────────────────────────────────
+
+async fn recording_helper_menu(
+    instance_mgr: &InstanceManager,
+    game_dir: &PathBuf,
+) -> Result<()> {
+    let instances = instance_mgr.load_all().await?;
+    let mods_dir = if instances.is_empty() {
+        game_dir.join("mods")
+    } else {
+        let mut labels = vec!["Default game dir".to_string()];
+        labels.extend(instances.iter().map(|i| i.name.clone()));
+        let i = Select::with_theme(&theme()).with_prompt("Check mods in").items(&labels).default(0).interact()?;
+        if i == 0 { game_dir.join("mods") } else { instance_mgr.instance_dir(&instances[i - 1].name).join("mods") }
+    };
+
+    let recorder = recording::detect(&mods_dir);
+
+    println!();
+    println!("  {} Recording Helper", style("◆").cyan());
+    println!();
+
+    match &recorder {
+        recording::Recorder::Obs => {
+            println!("  {} OBS Studio detected on this system.", style("✓").green());
+            println!();
+            for line in recording::obs_setup_guide().lines() {
+                if line.is_empty() { println!(); } else { println!("  {}", line); }
+            }
+        }
+        recording::Recorder::ReplayMod => {
+            println!("  {} ReplayMod detected in this instance.", style("✓").green());
+            println!();
+            for line in recording::replay_mod_setup_guide().lines() {
+                if line.is_empty() { println!(); } else { println!("  {}", line); }
+            }
+        }
+        recording::Recorder::None => {
+            println!("  {} No recording tool detected.", style("ℹ").yellow());
+            println!();
+            for line in recording::no_recorder_guide().lines() {
+                if line.is_empty() { println!(); } else { println!("  {}", line); }
+            }
+            println!();
+            let choice = Select::with_theme(&theme())
+                .with_prompt("Open download page")
+                .items(&["OBS Studio", "ReplayMod", "Windows Game Bar info", "Back"])
+                .default(0)
+                .interact()?;
+            match choice {
+                0 => { let _ = open::that("https://obsproject.com"); }
+                1 => { let _ = open::that("https://www.replaymod.com"); }
+                2 => { let _ = open::that("https://xbox.com/en-US/apps/xbox-game-bar"); }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
+// ── Splash Screen Editor ──────────────────────────────────────────────────────
+
+async fn splash_screen_editor_menu(texture_mgr: &TextureManager) -> Result<()> {
+    let packs = texture_mgr.list_packs().await?;
+    if packs.is_empty() {
+        println!("  No resource packs found. Create one first via 'Resource Pack Wizard'.");
+        return Ok(());
+    }
+
+    let pack_names: Vec<&str> = packs.iter().map(|p| p.name.as_str()).collect();
+    let p_idx = Select::with_theme(&theme()).with_prompt("Select pack").items(&pack_names).default(0).interact()?;
+    let pack_dir = &packs[p_idx].path;
+
+    loop {
+        let lines = splashscreen::load(pack_dir).await.unwrap_or_default();
+        println!();
+        println!("  {} Splash Screen Editor — {}", style("◆").cyan(), packs[p_idx].name);
+        println!("  {} splash(es):", lines.len());
+        for (i, l) in lines.iter().enumerate() {
+            println!("  {}. {}", i + 1, style(l).cyan());
+        }
+        println!();
+
+        let choice = Select::with_theme(&theme())
+            .with_prompt("Splash Editor")
+            .items(&["Add splash", "Remove splash", "Import from file", "Back"])
+            .default(0)
+            .interact()?;
+
+        match choice {
+            0 => {
+                let text: String = Input::with_theme(&theme())
+                    .with_prompt("Splash text (max 256 chars)")
+                    .validate_with(|s: &String| {
+                        if s.trim().is_empty() { Err("Cannot be empty.") }
+                        else if s.len() > 256 { Err("Max 256 characters.") }
+                        else { Ok(()) }
+                    })
+                    .interact_text()?;
+                match splashscreen::add(pack_dir, text.trim()).await {
+                    Ok(_)  => println!("  {} Added.", style("✓").green()),
+                    Err(e) => println!("  {} {}", style("✗").red(), e),
+                }
+            }
+            1 => {
+                if lines.is_empty() { println!("  No splashes to remove."); continue; }
+                let line_labels: Vec<String> = lines.iter().enumerate()
+                    .map(|(i, l)| format!("{}. {}", i + 1, l.chars().take(60).collect::<String>()))
+                    .collect();
+                let i = Select::with_theme(&theme()).with_prompt("Remove splash").items(&line_labels).default(0).interact()?;
+                match splashscreen::remove(pack_dir, i).await {
+                    Ok(_)  => println!("  {} Removed.", style("✓").green()),
+                    Err(e) => println!("  {} {}", style("✗").red(), e),
+                }
+            }
+            2 => {
+                let path_str: String = Input::with_theme(&theme()).with_prompt("Path to text file (one splash per line)").interact_text()?;
+                match splashscreen::import_file(pack_dir, &PathBuf::from(path_str.trim())).await {
+                    Ok(n)  => println!("  {} Imported {} new splash(es).", style("✓").green(), n),
+                    Err(e) => println!("  {} {}", style("✗").red(), e),
+                }
+            }
+            _ => break,
+        }
+    }
+    Ok(())
+}
+
+// ── Config Export / Import ────────────────────────────────────────────────────
+
+async fn config_export_import_menu(data_dir: &PathBuf) -> Result<()> {
+    println!();
+    println!("  {} Config Export / Import", style("◆").cyan());
+    println!("  Exports/imports the entire launcher data directory (accounts excluded).");
+    println!();
+
+    let choice = Select::with_theme(&theme())
+        .with_prompt("Config Export / Import")
+        .items(&["Export config to zip", "Import config from zip", "Back"])
+        .default(0)
+        .interact()?;
+
+    match choice {
+        0 => {
+            let dest: String = Input::with_theme(&theme())
+                .with_prompt("Save zip to path")
+                .with_initial_text("SumerianConfig.zip")
+                .interact_text()?;
+            let dest_path = PathBuf::from(dest.trim());
+            println!("  {} Exporting...", style("→").cyan());
+            match tokio::task::spawn_blocking({
+                let d = data_dir.clone();
+                let p = dest_path.clone();
+                move || configexport::export(&d, &p)
+            }).await? {
+                Ok(path) => println!("  {} Exported to {}", style("✓").green(), path.display()),
+                Err(e)   => println!("  {} {}", style("✗").red(), e),
+            }
+        }
+        1 => {
+            let src: String = Input::with_theme(&theme())
+                .with_prompt("Path to config zip")
+                .interact_text()?;
+            let src_path = PathBuf::from(src.trim());
+            let confirm = Confirm::with_theme(&theme())
+                .with_prompt("This will overwrite existing launcher files (accounts preserved). Continue?")
+                .default(false)
+                .interact()?;
+            if confirm {
+                println!("  {} Importing...", style("→").cyan());
+                match tokio::task::spawn_blocking({
+                    let d = data_dir.clone();
+                    let p = src_path.clone();
+                    move || configexport::import(&p, &d)
+                }).await? {
+                    Ok(n)  => println!("  {} Imported {} file(s).", style("✓").green(), n),
+                    Err(e) => println!("  {} {}", style("✗").red(), e),
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+// ── Screenshot Gallery (updated with clipboard/upload) ────────────────────────
+
+async fn screenshot_gallery(
+    http: &reqwest::Client,
+    instance_mgr: &InstanceManager,
+    game_dir: &PathBuf,
+) -> Result<()> {
+    let instances = instance_mgr.load_all().await?;
+    let dir = if instances.is_empty() {
+        game_dir.clone()
+    } else {
+        let mut labels: Vec<String> = vec!["Default game dir".into()];
+        labels.extend(instances.iter().map(|i| i.name.clone()));
+        let i = Select::with_theme(&theme()).with_prompt("Screenshots from").items(&labels).default(0).interact()?;
+        if i == 0 { game_dir.clone() } else { instance_mgr.instance_dir(&instances[i - 1].name) }
+    };
+
+    let shots = ScreenshotGallery::list(&dir).await?;
+    if shots.is_empty() {
+        println!("  No screenshots found in {}", dir.join("screenshots").display());
+        return Ok(());
+    }
+
+    let mut labels: Vec<String> = shots.iter()
+        .map(|p| p.file_name().unwrap_or_default().to_string_lossy().to_string())
+        .collect();
+    labels.push("Open folder".into());
+    labels.push("Back".into());
+
+    println!();
+    println!("  {} Screenshots ({})", style("◆").cyan(), shots.len());
+    println!();
+    let idx = Select::with_theme(&theme()).with_prompt("Select screenshot").items(&labels).default(0).interact()?;
+
+    if idx == shots.len() {
+        let _ = ScreenshotGallery::open_folder(&dir);
+    } else if idx < shots.len() {
+        let action_choice = Select::with_theme(&theme())
+            .with_prompt("Action")
+            .items(&["Open in viewer", "Copy path to clipboard", "Upload to 0x0.st (get URL)", "Back"])
+            .default(0)
+            .interact()?;
+        match action_choice {
+            0 => {
+                match ScreenshotGallery::open(&shots[idx]) {
+                    Ok(_)  => println!("  {} Opened.", style("✓").green()),
+                    Err(e) => println!("  {} {}", style("✗").red(), e),
+                }
+            }
+            1 => {
+                match ScreenshotGallery::copy_path_to_clipboard(&shots[idx]) {
+                    Ok(true)  => println!("  {} Path copied to clipboard.", style("✓").green()),
+                    Ok(false) => println!("  {} No clipboard tool found (clip/pbcopy/xclip).", style("⚠").yellow()),
+                    Err(e)    => println!("  {} {}", style("✗").red(), e),
+                }
+            }
+            2 => {
+                println!("  {} Uploading to 0x0.st...", style("→").cyan());
+                match ScreenshotGallery::upload_to_paste(http, &shots[idx]).await {
+                    Ok(url) => {
+                        println!("  {} {}", style("✓").green(), style(&url).cyan().underlined());
+                        // Also copy to clipboard if possible
+                        let _ = ScreenshotGallery::copy_path_to_clipboard(std::path::Path::new(&url));
+                        println!("  {} URL copied to clipboard.", style("ℹ").cyan());
+                    }
+                    Err(e) => println!("  {} {}", style("✗").red(), e),
+                }
+            }
+            _ => {}
+        }
     }
     Ok(())
 }
