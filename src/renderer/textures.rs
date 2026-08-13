@@ -25,6 +25,11 @@ impl TextureManager {
         Ok(())
     }
 
+    /// Returns the directory where texture packs are stored.
+    pub fn packs_dir(&self) -> PathBuf {
+        self.textures_dir.join("packs")
+    }
+
     pub async fn list_packs(&self) -> Result<Vec<TexturePack>> {
         let packs_dir = self.textures_dir.join("packs");
         let mut packs = Vec::new();

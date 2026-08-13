@@ -26,6 +26,12 @@ pub struct Instance {
     pub created_at: String,
     #[serde(default)]
     pub notes: String,
+    /// RFC3339 timestamp of the most recent launch.
+    #[serde(default)]
+    pub last_played: Option<String>,
+    /// User-defined category tags (e.g. "modded", "speedrun").
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 /// Per-instance mod enable/disable profile stored as `mod_profile.json`.
@@ -76,6 +82,8 @@ impl InstanceManager {
             version_id: version_id.to_string(),
             created_at: chrono::Utc::now().to_rfc3339(),
             notes: String::new(),
+            last_played: None,
+            tags: Vec::new(),
         };
         all.push(instance.clone());
         self.save_all(&all).await?;
@@ -86,6 +94,26 @@ impl InstanceManager {
         let mut all = self.load_all().await?;
         match all.iter_mut().find(|i| i.name.eq_ignore_ascii_case(name)) {
             Some(i) => i.notes = notes.to_string(),
+            None => bail!("Instance '{}' not found.", name),
+        }
+        self.save_all(&all).await
+    }
+
+    /// Update the last_played timestamp for an instance (call after a successful launch).
+    pub async fn set_last_played(&self, name: &str) -> Result<()> {
+        let mut all = self.load_all().await?;
+        match all.iter_mut().find(|i| i.name.eq_ignore_ascii_case(name)) {
+            Some(i) => i.last_played = Some(chrono::Utc::now().to_rfc3339()),
+            None => bail!("Instance '{}' not found.", name),
+        }
+        self.save_all(&all).await
+    }
+
+    /// Replace the full tag list for an instance.
+    pub async fn set_tags(&self, name: &str, tags: Vec<String>) -> Result<()> {
+        let mut all = self.load_all().await?;
+        match all.iter_mut().find(|i| i.name.eq_ignore_ascii_case(name)) {
+            Some(i) => i.tags = tags,
             None => bail!("Instance '{}' not found.", name),
         }
         self.save_all(&all).await
@@ -107,6 +135,8 @@ impl InstanceManager {
             version_id: src_inst.version_id.clone(),
             created_at: chrono::Utc::now().to_rfc3339(),
             notes: src_inst.notes.clone(),
+            last_played: None,
+            tags: src_inst.tags.clone(),
         };
         all.push(new_inst.clone());
         self.save_all(&all).await?;

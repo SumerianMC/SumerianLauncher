@@ -20,6 +20,9 @@ pub struct ModVersion {
     pub version_number: String,
     pub name: String,
     pub files: Vec<UpdateFile>,
+    /// Markdown changelog provided by the mod author on Modrinth.
+    #[serde(default)]
+    pub changelog: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -35,6 +38,8 @@ pub struct ModUpdate {
     pub latest_version: String,
     pub download_url: String,
     pub new_filename: String,
+    /// Changelog body fetched from Modrinth (may be empty if unavailable).
+    pub changelog: String,
 }
 
 pub async fn check_updates(
@@ -97,12 +102,20 @@ pub async fn check_updates(
         if update.version_number != current_version {
             let file = update.files.iter().find(|f| f.primary).or_else(|| update.files.first());
             if let Some(file) = file {
+                let changelog = update.changelog
+                    .clone()
+                    .unwrap_or_default()
+                    .lines()
+                    .take(20)           // cap at 20 lines so the UI stays readable
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 updates.push(ModUpdate {
                     filename,
                     current_version,
                     latest_version: update.version_number,
                     download_url: file.url.clone(),
                     new_filename: file.filename.clone(),
+                    changelog,
                 });
             }
         }

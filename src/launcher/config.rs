@@ -27,6 +27,12 @@ pub struct LauncherConfig {
     pub check_updates_on_start: bool,
     #[serde(default)]
     pub discord_rpc: bool,
+    /// URL to POST webhook payloads to on game start/stop. Empty = disabled.
+    #[serde(default)]
+    pub webhook_url: Option<String>,
+    /// When true, FPS and heap statistics are sampled from logs during each session.
+    #[serde(default)]
+    pub benchmark_mode: bool,
 }
 
 impl Default for LauncherConfig {
@@ -42,6 +48,8 @@ impl Default for LauncherConfig {
             close_on_launch: false,
             check_updates_on_start: true,
             discord_rpc: true,
+            webhook_url: None,
+            benchmark_mode: false,
         }
     }
 }

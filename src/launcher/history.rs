@@ -11,6 +11,21 @@ pub struct LaunchRecord {
     pub started_at: DateTime<Utc>,
     pub duration_secs: u64,
     pub exit_code: Option<i32>,
+    /// User-written note attached after the session ends.
+    #[serde(default)]
+    pub notes: Option<String>,
+    /// Average FPS sampled from logs/latest.log during the session.
+    #[serde(default)]
+    pub fps_avg: Option<u32>,
+    /// Minimum FPS observed.
+    #[serde(default)]
+    pub fps_min: Option<u32>,
+    /// Maximum FPS observed.
+    #[serde(default)]
+    pub fps_max: Option<u32>,
+    /// Peak JVM heap usage in MB sampled from logs during the session.
+    #[serde(default)]
+    pub peak_heap_mb: Option<u64>,
 }
 
 pub struct HistoryManager {
@@ -35,6 +50,16 @@ impl HistoryManager {
         // Keep last 100 entries
         if records.len() > 100 {
             records.drain(0..records.len() - 100);
+        }
+        fs::write(&self.path, serde_json::to_string_pretty(&records)?).await?;
+        Ok(())
+    }
+
+    /// Attach a note to the most-recent launch record.
+    pub async fn set_last_note(&self, note: &str) -> Result<()> {
+        let mut records = self.load().await?;
+        if let Some(last) = records.last_mut() {
+            last.notes = Some(note.to_string());
         }
         fs::write(&self.path, serde_json::to_string_pretty(&records)?).await?;
         Ok(())

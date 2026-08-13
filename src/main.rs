@@ -13,8 +13,11 @@ use client::injection::{GameLauncher, LaunchOptions, detect_java_major, find_jav
 use launcher::{
     auth::{AuthSession, AuthType, Authenticator, ProfileManager},
     backup::BackupManager,
+    benchmark,
     config::ConfigManager,
+    conflicts,
     downloader::Downloader,
+    friends::{Friend, FriendList},
     history::{HistoryManager, LaunchRecord},
     instances::{InstanceManager, InstanceProfile, WorldManager},
     loader,
@@ -23,18 +26,22 @@ use launcher::{
     modpacks::ModpackInstaller,
     mods::ModManager,
     news,
+    portforward,
     presets::{LaunchPreset, PresetManager},
     screenshots::ScreenshotGallery,
     servers::ServerBrowser,
     skins::SkinManager,
+    trending,
     updater,
     version::VersionManager,
     discord::DiscordPresence,
+    webhook::{self, WebhookEvent},
 };
 use lang::{Lang, load_lang, save_lang};
 use optimizer::OptimizationProfile;
 
 use renderer::{
+    packwizard::{self, PackSpec, ProceduralTexture},
     pipeline::RenderPipeline,
     shaders::ShaderManager,
     textures::TextureManager,
@@ -169,6 +176,7 @@ async fn main() -> Result<()> {
     let server_browser = ServerBrowser::new(&base);
     let modpack_installer = ModpackInstaller::new(http.clone());
     let config_mgr = ConfigManager::new(&base);
+    let friend_list = FriendList::new(&base);
     let mut lang = load_lang(&base);
 
     loop {
@@ -193,6 +201,10 @@ async fn main() -> Result<()> {
             "Server Browser",
             "Install Modpack",
             "Playtime",
+            "Friends",
+            "Trending Mods",
+            "Resource Pack Wizard",
+            "Port Forwarding Helper",
             "Settings",
             "Language / Idioma / Langue",
             lang.menu_exit.as_str(),
@@ -204,16 +216,16 @@ async fn main() -> Result<()> {
             .interact()?;
 
         match choice {
-            0 => install_version(&http, &downloader, &version_mgr, &game).await?,
-            1 => install_mod_loader(&http, &version_mgr, &game).await?,
-            2 => launch_game(&http, &downloader, &auth, &profiles, &version_mgr, &texture_mgr, &shader_mgr, &history_mgr, &instance_mgr, &backup_mgr, &config_mgr, &game).await?,
-            3 => launch_preset(&http, &downloader, &auth, &profiles, &preset_mgr, &version_mgr, &texture_mgr, &shader_mgr, &history_mgr, &instance_mgr, &backup_mgr, &config_mgr, &game).await?,
-            4 => manage_presets(&preset_mgr, &version_mgr, &texture_mgr, &shader_mgr).await?,
-            5 => manage_accounts(&auth, &profiles, &base).await?,
-            6 => manage_textures(&texture_mgr, &game).await?,
-            7 => manage_shaders(&shader_mgr, &game).await?,
-            8 => manage_instances(&instance_mgr, &version_mgr, &backup_mgr, &game).await?,
-            9 => manage_mods(&mod_mgr, &instance_mgr, &version_mgr, &game).await?,
+            0  => install_version(&http, &downloader, &version_mgr, &game).await?,
+            1  => install_mod_loader(&http, &version_mgr, &game).await?,
+            2  => launch_game(&http, &downloader, &auth, &profiles, &version_mgr, &texture_mgr, &shader_mgr, &history_mgr, &instance_mgr, &backup_mgr, &config_mgr, &game).await?,
+            3  => launch_preset(&http, &downloader, &auth, &profiles, &preset_mgr, &version_mgr, &texture_mgr, &shader_mgr, &history_mgr, &instance_mgr, &backup_mgr, &config_mgr, &game).await?,
+            4  => manage_presets(&preset_mgr, &version_mgr, &texture_mgr, &shader_mgr).await?,
+            5  => manage_accounts(&auth, &profiles, &base).await?,
+            6  => manage_textures(&texture_mgr, &game).await?,
+            7  => manage_shaders(&shader_mgr, &game).await?,
+            8  => manage_instances(&instance_mgr, &version_mgr, &backup_mgr, &game).await?,
+            9  => manage_mods(&mod_mgr, &instance_mgr, &version_mgr, &game).await?,
             10 => check_mod_updates(&http, &instance_mgr, &version_mgr, &game).await?,
             11 => manage_skins(&skin_mgr, &auth, &profiles).await?,
             12 => manage_worlds(&instance_mgr, &game).await?,
@@ -224,8 +236,12 @@ async fn main() -> Result<()> {
             17 => server_browser_menu(&server_browser).await?,
             18 => install_modpack(&modpack_installer, &instance_mgr, &version_mgr).await?,
             19 => view_playtime(&history_mgr).await?,
-            20 => settings_menu(&config_mgr).await?,
-            21 => {
+            20 => friends_menu(&friend_list).await?,
+            21 => trending_mods_menu(&http, &version_mgr).await?,
+            22 => resource_pack_wizard(&texture_mgr).await?,
+            23 => port_forwarding_menu(&game).await?,
+            24 => settings_menu(&config_mgr).await?,
+            25 => {
                 let all = Lang::all();
                 let names: Vec<&str> = all.iter().map(|l| l.name.as_str()).collect();
                 let cur = all.iter().position(|l| l.code == lang.code).unwrap_or(0);
@@ -238,7 +254,7 @@ async fn main() -> Result<()> {
                 let _ = save_lang(&base, &lang.code);
                 println!("  {} Language set to {}", style("✓").green(), style(&lang.name).cyan());
             }
-            22 => {
+            26 => {
                 println!("  {}", lang.goodbye);
                 break;
             }
@@ -356,22 +372,26 @@ async fn launch_game(
 
     // Instance selection
     let instances = instance_mgr.load_all().await?;
-    let (game_dir_override, inst_profile) = if instances.is_empty() {
-        (None, InstanceProfile::default())
+    let (game_dir_override, inst_profile, selected_inst_name) = if instances.is_empty() {
+        (None, InstanceProfile::default(), None)
     } else {
         let mut inst_labels: Vec<String> = vec!["Default (shared game dir)".into()];
-        inst_labels.extend(instances.iter().map(|i| format!("{} [{}]", i.name, i.version_id)));
+        inst_labels.extend(instances.iter().map(|i| {
+            let tags = if i.tags.is_empty() { String::new() } else { format!(" [{}]", i.tags.join(", ")) };
+            let played = i.last_played.as_deref().and_then(|s| s.get(..10)).unwrap_or("never");
+            format!("{} [{}]{} — last played: {}", i.name, i.version_id, tags, played)
+        }));
         let i_idx = Select::with_theme(&theme())
             .with_prompt("Instance")
             .items(&inst_labels)
             .default(0)
             .interact()?;
         if i_idx == 0 {
-            (None, InstanceProfile::default())
+            (None, InstanceProfile::default(), None)
         } else {
             let inst = &instances[i_idx - 1];
             let profile = instance_mgr.load_profile(&inst.name).await;
-            (Some(instance_mgr.instance_dir(&inst.name)), profile)
+            (Some(instance_mgr.instance_dir(&inst.name)), profile, Some(inst.name.clone()))
         }
     };
 
@@ -381,7 +401,30 @@ async fn launch_game(
         downloader.download_assets(asset_index).await?;
     }
 
-    // Optimization profile — instance profile overrides global picker
+    // Conflict detection
+    let mods_dir = game_dir_override.as_ref()
+        .map(|d| d.join("mods"))
+        .unwrap_or_else(|| game_dir.join("mods"));
+    let conflict_warnings = conflicts::detect(&mods_dir);
+    if !conflict_warnings.is_empty() {
+        println!();
+        println!("  {} Mod conflict warnings:", style("⚠").yellow().bold());
+        for w in &conflict_warnings {
+            let sev = match w.severity {
+                conflicts::Severity::Critical => style("CRITICAL").red().bold(),
+                conflicts::Severity::Warning  => style("WARNING").yellow(),
+            };
+            println!("    {} [{}] {}", style("•").dim(), sev, w.message);
+        }
+        let proceed = Confirm::with_theme(&theme())
+            .with_prompt("Conflicts detected. Launch anyway?")
+            .default(false)
+            .interact()?;
+        if !proceed { return Ok(()); }
+        println!();
+    }
+
+    // Optimization profile
     let opt_profiles = OptimizationProfile::all();
     let ram_mb = optimizer::auto_heap_mb();
     let profile_labels: Vec<String> = opt_profiles
@@ -426,11 +469,7 @@ async fn launch_game(
             .items(&pack_labels)
             .default(0)
             .interact()?;
-        if t_idx == 0 {
-            None
-        } else {
-            Some(packs[t_idx - 1].name.clone())
-        }
+        if t_idx == 0 { None } else { Some(packs[t_idx - 1].name.clone()) }
     };
 
     // Shader preset selection
@@ -445,22 +484,13 @@ async fn launch_game(
             .items(&preset_labels)
             .default(0)
             .interact()?;
-        if s_idx == 0 {
-            None
-        } else {
-            Some(presets[s_idx - 1].clone())
-        }
+        if s_idx == 0 { None } else { Some(presets[s_idx - 1].clone()) }
     };
 
     // Apply render pipeline
     let pipeline = RenderPipeline::new(texture_mgr, shader_mgr);
     pipeline
-        .apply(
-            texture_choice.as_deref(),
-            shader_choice.as_deref(),
-            game_dir,
-            &era,
-        )
+        .apply(texture_choice.as_deref(), shader_choice.as_deref(), game_dir, &era)
         .await?;
 
     check_java_version(&meta, &http).await;
@@ -476,18 +506,17 @@ async fn launch_game(
             .unwrap_or_else(|| "default".to_string());
         print!("  {} Auto-backup... ", style("→").cyan());
         match backup_mgr.create_backup(&inst_label, backup_dir).await {
-            Ok(p) => println!("{} ({})", style("✓").green(), p.file_name().unwrap_or_default().to_string_lossy()),
+            Ok(p)  => println!("{} ({})", style("✓").green(), p.file_name().unwrap_or_default().to_string_lossy()),
             Err(e) => println!("{} {}", style("⚠").yellow(), e),
         }
     }
 
-    // ── Account selection ────────────────────────────────────────────────────
+    // Account selection
     let mut session = pick_session(auth, profiles).await?;
-    // Session validation
     if session.auth_type == AuthType::Microsoft {
         print!("  {} Validating session... ", style("→").cyan());
         match auth.validate_session(&session).await {
-            Ok(true) => println!("{}", style("✓").green()),
+            Ok(true)  => println!("{}", style("✓").green()),
             Ok(false) => {
                 println!("{}", style("expired").yellow());
                 println!("  {} Token expired — refreshing...", style("→").cyan());
@@ -507,6 +536,20 @@ async fn launch_game(
         }
     );
 
+    // Webhook — game started
+    if let Some(ref url) = cfg.webhook_url {
+        webhook::fire(http, url, WebhookEvent::GameStarted, &meta.id, &session.username, None).await;
+    }
+
+    // Start benchmark sampler if enabled
+    let benchmark_handle = if cfg.benchmark_mode {
+        let effective_dir = game_dir_override.as_ref().unwrap_or(game_dir);
+        println!("  {} Benchmark mode active — FPS/heap will be sampled from logs.", style("ℹ").cyan());
+        Some(benchmark::start(effective_dir))
+    } else {
+        None
+    };
+
     // Launch
     let launcher = GameLauncher::new(game_dir.clone());
     let opts = LaunchOptions {
@@ -517,7 +560,7 @@ async fn launch_game(
         height: launch_height,
         server: None,
         port: None,
-        game_dir_override,
+        game_dir_override: game_dir_override.clone(),
     };
     let mut child = launcher.launch(&meta, &opts, version_mgr)?;
     let mut discord = DiscordPresence::new();
@@ -530,12 +573,50 @@ async fn launch_game(
     let duration_secs = start.elapsed().as_secs();
     let exit_code = status.code();
 
+    // Collect benchmark stats
+    let bench_stats = benchmark_handle.map(|h| h.finish());
+    if let Some(ref s) = bench_stats {
+        if let Some(avg) = s.fps_avg() {
+            println!(
+                "  {} FPS — avg: {}  min: {}  max: {}",
+                style("◆").cyan(),
+                style(avg).green(),
+                s.fps_min().unwrap_or(0),
+                s.fps_max().unwrap_or(0),
+            );
+        }
+        if let Some(peak) = s.peak_heap_mb() {
+            println!("  {} Peak heap: {} MB", style("◆").cyan(), style(peak).yellow());
+        }
+    }
+
+    // Webhook — game stopped
+    if let Some(ref url) = cfg.webhook_url {
+        webhook::fire(http, url, WebhookEvent::GameStopped, &meta.id, &session.username, Some(duration_secs)).await;
+    }
+
+    // Update instance last_played
+    if let Some(ref inst_name) = selected_inst_name {
+        let _ = instance_mgr.set_last_played(inst_name).await;
+    }
+
+    // Session note prompt
+    let note_raw: String = Input::with_theme(&theme())
+        .with_prompt("Session note (optional, Enter to skip)")
+        .allow_empty(true)
+        .interact_text()?;
+
     history_mgr.push(LaunchRecord {
         version_id: meta.id.clone(),
         username: session.username.clone(),
         started_at,
         duration_secs,
         exit_code,
+        notes: if note_raw.trim().is_empty() { None } else { Some(note_raw.trim().to_string()) },
+        fps_avg: bench_stats.as_ref().and_then(|s| s.fps_avg()),
+        fps_min: bench_stats.as_ref().and_then(|s| s.fps_min()),
+        fps_max: bench_stats.as_ref().and_then(|s| s.fps_max()),
+        peak_heap_mb: bench_stats.as_ref().and_then(|s| s.peak_heap_mb()),
     }).await.ok();
 
     println!("  Game exited with status: {}", status);
@@ -957,8 +1038,7 @@ async fn launch_preset(
     // Auto-backup on launch if enabled
     let cfg = config_mgr.load().await;
     if cfg.auto_backup_on_launch {
-        let backup_dir = match &preset.instance {
-            Some(name) => instance_mgr.instance_dir(name),
+        let backup_dir = match &preset.instance {            Some(name) => instance_mgr.instance_dir(name),
             None => game_dir.clone(),
         };
         let inst_label = preset.instance.as_deref().unwrap_or("default");
@@ -997,14 +1077,49 @@ async fn launch_preset(
     let game_dir_override = match &preset.instance {
         Some(name) => {
             let dir = instance_mgr.instance_dir(name);
-            if dir.exists() {
-                Some(dir)
-            } else {
+            if dir.exists() { Some(dir) } else {
                 println!("  {} Instance '{}' not found, using default game dir.", style("⚠").yellow(), name);
                 None
             }
         }
         None => None,
+    };
+
+    // Conflict detection
+    let mods_dir_check = game_dir_override.as_ref()
+        .map(|d| d.join("mods"))
+        .unwrap_or_else(|| game_dir.join("mods"));
+    let conflict_warnings = conflicts::detect(&mods_dir_check);
+    if !conflict_warnings.is_empty() {
+        println!();
+        println!("  {} Mod conflict warnings:", style("⚠").yellow().bold());
+        for w in &conflict_warnings {
+            let sev = match w.severity {
+                conflicts::Severity::Critical => style("CRITICAL").red().bold(),
+                conflicts::Severity::Warning  => style("WARNING").yellow(),
+            };
+            println!("    {} [{}] {}", style("•").dim(), sev, w.message);
+        }
+        let proceed = Confirm::with_theme(&theme())
+            .with_prompt("Conflicts detected. Launch anyway?")
+            .default(false)
+            .interact()?;
+        if !proceed { return Ok(()); }
+        println!();
+    }
+
+    // Webhook — game started
+    if let Some(ref url) = cfg.webhook_url {
+        webhook::fire(http, url, WebhookEvent::GameStarted, &meta.id, &session.username, None).await;
+    }
+
+    // Benchmark sampler
+    let benchmark_handle = if cfg.benchmark_mode {
+        let effective_dir = game_dir_override.as_ref().unwrap_or(game_dir);
+        println!("  {} Benchmark mode active.", style("ℹ").cyan());
+        Some(benchmark::start(effective_dir))
+    } else {
+        None
     };
 
     let launcher = GameLauncher::new(game_dir.clone());
@@ -1016,7 +1131,7 @@ async fn launch_preset(
         height: preset.height,
         server: preset.server.as_deref(),
         port: preset.port,
-        game_dir_override,
+        game_dir_override: game_dir_override.clone(),
     };
     let mut child = launcher.launch(&meta, &opts, version_mgr)?;
 
@@ -1035,12 +1150,44 @@ async fn launch_preset(
     let duration_secs = start.elapsed().as_secs();
     let exit_code = status.code();
 
+    let bench_stats = benchmark_handle.map(|h| h.finish());
+    if let Some(ref s) = bench_stats {
+        if let Some(avg) = s.fps_avg() {
+            println!("  {} FPS — avg: {}  min: {}  max: {}", style("◆").cyan(),
+                style(avg).green(), s.fps_min().unwrap_or(0), s.fps_max().unwrap_or(0));
+        }
+        if let Some(peak) = s.peak_heap_mb() {
+            println!("  {} Peak heap: {} MB", style("◆").cyan(), style(peak).yellow());
+        }
+    }
+
+    // Webhook — game stopped
+    if let Some(ref url) = cfg.webhook_url {
+        webhook::fire(http, url, WebhookEvent::GameStopped, &meta.id, &session.username, Some(duration_secs)).await;
+    }
+
+    // Update instance last_played
+    if let Some(ref inst_name) = preset.instance {
+        let _ = instance_mgr.set_last_played(inst_name).await;
+    }
+
+    // Session note
+    let note_raw: String = Input::with_theme(&theme())
+        .with_prompt("Session note (optional, Enter to skip)")
+        .allow_empty(true)
+        .interact_text()?;
+
     history_mgr.push(LaunchRecord {
         version_id: meta.id.clone(),
         username: session.username.clone(),
         started_at,
         duration_secs,
         exit_code,
+        notes: if note_raw.trim().is_empty() { None } else { Some(note_raw.trim().to_string()) },
+        fps_avg: bench_stats.as_ref().and_then(|s| s.fps_avg()),
+        fps_min: bench_stats.as_ref().and_then(|s| s.fps_min()),
+        fps_max: bench_stats.as_ref().and_then(|s| s.fps_max()),
+        peak_heap_mb: bench_stats.as_ref().and_then(|s| s.peak_heap_mb()),
     }).await.ok();
 
     println!("  Game exited with status: {}", status);
@@ -1362,6 +1509,23 @@ async fn view_launch_history(history_mgr: &HistoryManager) -> Result<()> {
             mins, secs,
             exit,
         );
+        // FPS stats
+        if let Some(avg) = r.fps_avg {
+            println!(
+                "       FPS  avg: {}  min: {}  max: {}",
+                style(avg).green(),
+                r.fps_min.unwrap_or(0),
+                r.fps_max.unwrap_or(0),
+            );
+        }
+        // Heap peak
+        if let Some(peak) = r.peak_heap_mb {
+            println!("       Peak heap: {} MB", style(peak).yellow());
+        }
+        // Session note
+        if let Some(ref note) = r.notes {
+            println!("       Note: {}", style(note).italic().dim());
+        }
     }
     Ok(())
 }
@@ -1420,13 +1584,15 @@ async fn manage_instances(
         println!("  {} Instances ({})", style("◆").cyan(), instances.len());
         for i in &instances {
             let notes_str = if i.notes.is_empty() { String::new() } else { format!("  — {}", style(&i.notes).dim()) };
-            println!("  • {} [{}]  created: {}{}", style(&i.name).cyan(), i.version_id, &i.created_at[..10], notes_str);
+            let tags_str  = if i.tags.is_empty()  { String::new() } else { format!("  [{}]", i.tags.join(", ")) };
+            let played    = i.last_played.as_deref().and_then(|s| s.get(..10)).unwrap_or("never");
+            println!("  • {} [{}]  last: {}{}{}", style(&i.name).cyan(), i.version_id, played, tags_str, notes_str);
         }
         println!();
 
         let choice = Select::with_theme(&theme())
             .with_prompt("Instance Manager")
-            .items(&["Create instance", "Clone instance", "Delete instance", "Edit profile", "Edit notes", "Manage mod profile", "Backup instance", "Restore backup", "Export instance", "Import instance", "Back"])
+            .items(&["Create instance", "Clone instance", "Delete instance", "Edit profile", "Edit notes", "Manage tags", "Manage mod profile", "Backup instance", "Restore backup", "Export instance", "Import instance", "Back"])
             .default(0)
             .interact()?;
 
@@ -1518,12 +1684,34 @@ async fn manage_instances(
                 }
             }
             5 => {
+                // Manage tags
+                if instances.is_empty() { println!("  No instances."); continue; }
+                let labels: Vec<&str> = instances.iter().map(|i| i.name.as_str()).collect();
+                let i = Select::with_theme(&theme()).with_prompt("Select instance").items(&labels).default(0).interact()?;
+                let current_tags = instances[i].tags.join(", ");
+                println!("  Current tags: {}", if current_tags.is_empty() { style("(none)".to_string()).dim().to_string() } else { current_tags.clone() });
+                let tags_raw: String = Input::with_theme(&theme())
+                    .with_prompt("Tags (comma-separated, blank to clear)")
+                    .with_initial_text(&current_tags)
+                    .allow_empty(true)
+                    .interact_text()?;
+                let new_tags: Vec<String> = tags_raw
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                match instance_mgr.set_tags(&instances[i].name, new_tags).await {
+                    Ok(_)  => println!("  {} Tags saved.", style("✓").green()),
+                    Err(e) => println!("  {} {}", style("✗").red(), e),
+                }
+            }
+            6 => {
                 if instances.is_empty() { println!("  No instances."); continue; }
                 let labels: Vec<&str> = instances.iter().map(|i| i.name.as_str()).collect();
                 let i = Select::with_theme(&theme()).with_prompt("Select instance").items(&labels).default(0).interact()?;
                 manage_mod_profile(&instance_mgr, &instances[i].name).await?;
             }
-            6 => {
+            7 => {
                 if instances.is_empty() { println!("  No instances to back up."); continue; }
                 let labels: Vec<&str> = instances.iter().map(|i| i.name.as_str()).collect();
                 let i = Select::with_theme(&theme())
@@ -1536,7 +1724,7 @@ async fn manage_instances(
                     Err(e)   => println!("  {} {}", style("✗").red(), e),
                 }
             }
-            7 => {
+            8 => {
                 if instances.is_empty() { println!("  No instances available."); continue; }
                 let labels: Vec<&str> = instances.iter().map(|i| i.name.as_str()).collect();
                 let i = Select::with_theme(&theme())
@@ -1565,7 +1753,7 @@ async fn manage_instances(
                     }
                 }
             }
-            8 => {
+            9 => {
                 if instances.is_empty() { println!("  No instances to export."); continue; }
                 let labels: Vec<&str> = instances.iter().map(|i| i.name.as_str()).collect();
                 let i = Select::with_theme(&theme())
@@ -1580,7 +1768,7 @@ async fn manage_instances(
                     Err(e) => println!("  {} {}", style("✗").red(), e),
                 }
             }
-            9 => {
+            10 => {
                 let src: String = Input::with_theme(&theme())
                     .with_prompt("Path to instance zip")
                     .interact_text()?;
@@ -2097,8 +2285,17 @@ async fn check_mod_updates(
     println!("  {} {} update(s) available:", style("◆").cyan(), updates.len());
     for u in &updates {
         println!("  • {} {} → {}", style(&u.filename).cyan(), style(&u.current_version).dim(), style(&u.latest_version).green());
+        // Show changelog if present
+        if !u.changelog.is_empty() {
+            println!("    {} Changelog:", style("◆").dim());
+            for line in u.changelog.lines().take(8) {
+                if !line.trim().is_empty() {
+                    println!("      {}", style(line.trim()).dim());
+                }
+            }
+        }
+        println!();
     }
-    println!();
     if Confirm::with_theme(&theme()).with_prompt("Update all?").default(true).interact()? {
         for u in &updates {
             print!("  {} Updating {}... ", style("→").cyan(), u.filename);
@@ -2376,6 +2573,8 @@ async fn settings_menu(config_mgr: &ConfigManager) -> Result<()> {
         println!("  Auto-backup on launch: {}", if cfg.auto_backup_on_launch { style("on").green() } else { style("off").dim() });
         println!("  Discord RPC          : {}", if cfg.discord_rpc { style("on").green() } else { style("off").dim() });
         println!("  Check updates        : {}", if cfg.check_updates_on_start { style("on").green() } else { style("off").dim() });
+        println!("  Benchmark mode       : {}", if cfg.benchmark_mode { style("on").green() } else { style("off").dim() });
+        println!("  Webhook URL          : {}", cfg.webhook_url.as_deref().unwrap_or("(not set)"));
         println!("  Default resolution   : {}",
             match (cfg.default_width, cfg.default_height) {
                 (Some(w), Some(h)) => format!("{}x{}", w, h),
@@ -2394,6 +2593,8 @@ async fn settings_menu(config_mgr: &ConfigManager) -> Result<()> {
                 "Toggle auto-backup on launch",
                 "Toggle Discord RPC",
                 "Toggle update check on start",
+                "Toggle benchmark mode (FPS + heap sampling)",
+                "Set webhook URL",
                 "Set default resolution",
                 "Set Java 8 path",
                 "Set Java 21 path",
@@ -2415,6 +2616,23 @@ async fn settings_menu(config_mgr: &ConfigManager) -> Result<()> {
             2 => { cfg.discord_rpc = !cfg.discord_rpc; }
             3 => { cfg.check_updates_on_start = !cfg.check_updates_on_start; }
             4 => {
+                cfg.benchmark_mode = !cfg.benchmark_mode;
+                if cfg.benchmark_mode {
+                    println!("  {} Benchmark mode on — FPS and heap will be sampled from logs/latest.log during each session.", style("ℹ").cyan());
+                }
+            }
+            5 => {
+                println!("  Enter the URL to receive POST notifications on game start/stop.");
+                println!("  Works with Discord webhooks, Slack, ntfy.sh, or any HTTP endpoint.");
+                println!("  Leave blank to disable.");
+                let url: String = Input::with_theme(&theme())
+                    .with_prompt("Webhook URL")
+                    .with_initial_text(cfg.webhook_url.as_deref().unwrap_or(""))
+                    .allow_empty(true)
+                    .interact_text()?;
+                cfg.webhook_url = if url.trim().is_empty() { None } else { Some(url.trim().to_string()) };
+            }
+            6 => {
                 let use_res = Confirm::with_theme(&theme()).with_prompt("Set custom resolution?").default(cfg.default_width.is_some()).interact()?;
                 if use_res {
                     let w: String = Input::with_theme(&theme()).with_prompt("Width")
@@ -2432,19 +2650,19 @@ async fn settings_menu(config_mgr: &ConfigManager) -> Result<()> {
                     cfg.default_height = None;
                 }
             }
-            5 => {
+            7 => {
                 let p: String = Input::with_theme(&theme()).with_prompt("Java 8 binary path (blank = auto)").allow_empty(true)
                     .with_initial_text(cfg.java8_path.as_deref().unwrap_or("")).interact_text()?;
                 cfg.java8_path = if p.trim().is_empty() { None } else { Some(p.trim().to_string()) };
                 if let Some(ref path) = cfg.java8_path { std::env::set_var("JAVA8_HOME", std::path::Path::new(path).parent().and_then(|p| p.parent()).unwrap_or(std::path::Path::new(path))); }
             }
-            6 => {
+            8 => {
                 let p: String = Input::with_theme(&theme()).with_prompt("Java 21 binary path (blank = auto)").allow_empty(true)
                     .with_initial_text(cfg.java21_path.as_deref().unwrap_or("")).interact_text()?;
                 cfg.java21_path = if p.trim().is_empty() { None } else { Some(p.trim().to_string()) };
                 if let Some(ref path) = cfg.java21_path { std::env::set_var("JAVA21_HOME", std::path::Path::new(path).parent().and_then(|p| p.parent()).unwrap_or(std::path::Path::new(path))); }
             }
-            7 => {
+            9 => {
                 let p: String = Input::with_theme(&theme()).with_prompt("Java 25 binary path (blank = auto)").allow_empty(true)
                     .with_initial_text(cfg.java25_path.as_deref().unwrap_or("")).interact_text()?;
                 cfg.java25_path = if p.trim().is_empty() { None } else { Some(p.trim().to_string()) };
@@ -2570,6 +2788,339 @@ async fn view_playtime(history_mgr: &HistoryManager) -> Result<()> {
         }
     }
 
+    // ── FPS & Heap history ────────────────────────────────────────────────────
+    let records = history_mgr.load().await?;
+    let fps_records: Vec<_> = records.iter()
+        .filter(|r| r.fps_avg.is_some())
+        .rev()
+        .take(10)
+        .collect();
+    if !fps_records.is_empty() {
+        println!();
+        println!("  {} Recent FPS (last {} sessions with benchmark data):", style("◆").cyan(), fps_records.len());
+        let max_fps = fps_records.iter().filter_map(|r| r.fps_max).max().unwrap_or(1) as u64;
+        for r in fps_records.iter().rev() {
+            if let Some(avg) = r.fps_avg {
+                let date = r.started_at.format("%m-%d").to_string();
+                println!(
+                    "    {:<6} {} {}  min:{} max:{}",
+                    style(&date).dim(),
+                    bar(avg as u64, max_fps, 20),
+                    style(format!("{}fps avg", avg)).green(),
+                    r.fps_min.unwrap_or(0),
+                    r.fps_max.unwrap_or(0),
+                );
+            }
+        }
+    }
+
+    let heap_records: Vec<_> = records.iter()
+        .filter(|r| r.peak_heap_mb.is_some())
+        .rev()
+        .take(10)
+        .collect();
+    if !heap_records.is_empty() {
+        println!();
+        println!("  {} Peak Heap Usage (last {} sessions):", style("◆").cyan(), heap_records.len());
+        let max_heap = heap_records.iter().filter_map(|r| r.peak_heap_mb).max().unwrap_or(1);
+        for r in heap_records.iter().rev() {
+            if let Some(peak) = r.peak_heap_mb {
+                let date = r.started_at.format("%m-%d").to_string();
+                println!(
+                    "    {:<6} {} {}",
+                    style(&date).dim(),
+                    bar(peak, max_heap, 20),
+                    style(format!("{} MB", peak)).yellow(),
+                );
+            }
+        }
+    }
+
     println!();
+    Ok(())
+}
+
+// ── Friends List ──────────────────────────────────────────────────────────────
+
+async fn friends_menu(friend_list: &FriendList) -> Result<()> {
+    loop {
+        let friends = friend_list.load().await?;
+
+        println!();
+        println!("  {} Friends ({})", style("◆").cyan(), friends.len());
+        for (idx, f) in friends.iter().enumerate() {
+            let status = match f.ping() {
+                Some(ms) => style(format!("{}ms", ms)).green().to_string(),
+                None     => match f.server {
+                    Some(_) => style("offline").red().to_string(),
+                    None    => style("no server set").dim().to_string(),
+                },
+            };
+            let server_label = f.server.as_deref().unwrap_or("—");
+            println!(
+                "  {}. {} — {}  [{}]",
+                idx + 1,
+                style(&f.name).cyan(),
+                server_label,
+                status
+            );
+            if !f.notes.is_empty() {
+                println!("     {}", style(&f.notes).dim());
+            }
+        }
+        println!();
+
+        let choice = Select::with_theme(&theme())
+            .with_prompt("Friends")
+            .items(&["Add friend", "Edit friend", "Remove friend", "Refresh status", "Back"])
+            .default(0)
+            .interact()?;
+
+        match choice {
+            0 => {
+                let name: String = Input::with_theme(&theme())
+                    .with_prompt("Friend's name")
+                    .validate_with(|s: &String| if s.trim().is_empty() { Err("Name cannot be empty.") } else { Ok(()) })
+                    .interact_text()?;
+                let server: String = Input::with_theme(&theme())
+                    .with_prompt("Their server address (host:port or blank)")
+                    .allow_empty(true)
+                    .interact_text()?;
+                let notes: String = Input::with_theme(&theme())
+                    .with_prompt("Notes (optional)")
+                    .allow_empty(true)
+                    .interact_text()?;
+                friend_list.add(Friend {
+                    name: name.trim().to_string(),
+                    server: if server.trim().is_empty() { None } else { Some(server.trim().to_string()) },
+                    notes: notes.trim().to_string(),
+                }).await?;
+                println!("  {} Added.", style("✓").green());
+            }
+            1 => {
+                if friends.is_empty() { println!("  No friends to edit."); continue; }
+                let labels: Vec<String> = friends.iter().map(|f| f.name.clone()).collect();
+                let i = Select::with_theme(&theme()).with_prompt("Select friend").items(&labels).default(0).interact()?;
+                let name: String = Input::with_theme(&theme())
+                    .with_prompt("Name")
+                    .with_initial_text(&friends[i].name)
+                    .validate_with(|s: &String| if s.trim().is_empty() { Err("Name cannot be empty.") } else { Ok(()) })
+                    .interact_text()?;
+                let server: String = Input::with_theme(&theme())
+                    .with_prompt("Server address (blank to clear)")
+                    .with_initial_text(friends[i].server.as_deref().unwrap_or(""))
+                    .allow_empty(true)
+                    .interact_text()?;
+                let notes: String = Input::with_theme(&theme())
+                    .with_prompt("Notes")
+                    .with_initial_text(&friends[i].notes)
+                    .allow_empty(true)
+                    .interact_text()?;
+                friend_list.update(i, Friend {
+                    name: name.trim().to_string(),
+                    server: if server.trim().is_empty() { None } else { Some(server.trim().to_string()) },
+                    notes: notes.trim().to_string(),
+                }).await?;
+                println!("  {} Updated.", style("✓").green());
+            }
+            2 => {
+                if friends.is_empty() { println!("  No friends to remove."); continue; }
+                let labels: Vec<String> = friends.iter().map(|f| f.name.clone()).collect();
+                let i = Select::with_theme(&theme()).with_prompt("Remove friend").items(&labels).default(0).interact()?;
+                let confirm = Confirm::with_theme(&theme())
+                    .with_prompt(format!("Remove '{}'?", friends[i].name))
+                    .default(false).interact()?;
+                if confirm {
+                    friend_list.remove(i).await?;
+                    println!("  {} Removed.", style("✓").green());
+                }
+            }
+            3 => {
+                // Re-entering the loop will re-ping automatically.
+                continue;
+            }
+            _ => break,
+        }
+    }
+    Ok(())
+}
+
+// ── Trending Mods ─────────────────────────────────────────────────────────────
+
+async fn trending_mods_menu(http: &reqwest::Client, version_mgr: &VersionManager) -> Result<()> {
+    let installed = version_mgr.list_installed().await?;
+    let game_version = if installed.is_empty() {
+        Input::with_theme(&theme())
+            .with_prompt("Game version (e.g. 1.21.1)")
+            .interact_text()?
+    } else {
+        let labels: Vec<String> = installed.iter().map(|v| v.id.clone()).collect();
+        let i = Select::with_theme(&theme()).with_prompt("Game version").items(&labels).default(0).interact()?;
+        installed[i].id.clone()
+    };
+
+    let mut page = 0usize;
+    loop {
+        println!("  {} Fetching trending mods for {}...", style("→").cyan(), game_version);
+        let hits = match trending::fetch_trending(http, &game_version, page, 10).await {
+            Ok(h) => h,
+            Err(e) => { println!("  {} {}", style("✗").red(), e); return Ok(()); }
+        };
+
+        if hits.is_empty() {
+            println!("  No results found.");
+            return Ok(());
+        }
+
+        println!();
+        println!(
+            "  {} Trending Mods — {} (page {})",
+            style("◆").cyan(), game_version, page + 1
+        );
+        println!();
+        for (i, h) in hits.iter().enumerate() {
+            println!(
+                "  {}. {} {} ↓{}  ♥{}",
+                i + 1,
+                style(&h.title).cyan(),
+                if h.categories.is_empty() {
+                    String::new()
+                } else {
+                    format!("[{}]", h.categories.join(", "))
+                },
+                h.downloads,
+                h.follows,
+            );
+            let desc: String = h.description.chars().take(80).collect();
+            println!("     {}", style(desc).dim());
+        }
+        println!();
+
+        let choice = Select::with_theme(&theme())
+            .with_prompt("Trending Mods")
+            .items(&["Next page", "Previous page", "Back"])
+            .default(0)
+            .interact()?;
+
+        match choice {
+            0 => { page += 1; }
+            1 => { page = page.saturating_sub(1); }
+            _ => break,
+        }
+    }
+    Ok(())
+}
+
+// ── Resource Pack Wizard ──────────────────────────────────────────────────────
+
+async fn resource_pack_wizard(texture_mgr: &TextureManager) -> Result<()> {
+    println!();
+    println!("  {} Resource Pack Wizard", style("◆").cyan());
+    println!("  Creates a new pack with procedurally generated block textures.");
+    println!();
+
+    let name: String = Input::with_theme(&theme())
+        .with_prompt("Pack name (no spaces recommended)")
+        .validate_with(|s: &String| {
+            if s.trim().is_empty() { Err("Name cannot be empty.") } else { Ok(()) }
+        })
+        .interact_text()?;
+
+    let description: String = Input::with_theme(&theme())
+        .with_prompt("Pack description")
+        .with_initial_text("A custom Sumerian resource pack")
+        .interact_text()?;
+
+    // Ask which textures to generate
+    let all_textures = ProceduralTexture::all();
+    let tex_labels: Vec<&str> = all_textures.iter().map(|t| t.display_name()).collect();
+    println!();
+    println!("  Select textures to generate (spacebar to toggle, enter to confirm):");
+
+    // Use MultiSelect for texture picking — fall back to all if unavailable.
+    let chosen_indices: Vec<usize> = dialoguer::MultiSelect::with_theme(&theme())
+        .with_prompt("Textures to generate")
+        .items(&tex_labels)
+        .defaults(&vec![true; tex_labels.len()])
+        .interact()?;
+
+    let generate_textures: Vec<ProceduralTexture> = chosen_indices
+        .into_iter()
+        .map(|i| all_textures[i].clone())
+        .collect();
+
+    let spec = PackSpec {
+        name: name.trim().to_string(),
+        description: description.trim().to_string(),
+        generate_textures,
+    };
+
+    // The TextureManager stores packs in base/textures/packs/
+    let packs_base = texture_mgr.packs_dir();
+    println!("  {} Creating pack...", style("→").cyan());
+    match packwizard::create_pack(&packs_base, &spec).await {
+        Ok(path) => {
+            println!(
+                "  {} Pack '{}' created at {}",
+                style("✓").green(),
+                spec.name,
+                path.display()
+            );
+            println!(
+                "  {} Use 'Manage Textures → Import pack' to load it into the game.",
+                style("ℹ").cyan()
+            );
+        }
+        Err(e) => println!("  {} {}", style("✗").red(), e),
+    }
+    Ok(())
+}
+
+// ── Port Forwarding Helper ────────────────────────────────────────────────────
+
+async fn port_forwarding_menu(game_dir: &PathBuf) -> Result<()> {
+    let info = portforward::detect(game_dir);
+
+    println!();
+    println!("  {} Port Forwarding Helper", style("◆").cyan());
+    println!();
+    println!("  Local IP   : {}", style(&info.local_ip).cyan());
+    println!("  Server port: {}", style(info.port).green());
+    println!("  LAN address: {}", style(info.lan_address()).cyan());
+    println!();
+
+    let choice = Select::with_theme(&theme())
+        .with_prompt("How do you want to share your server?")
+        .items(&["ngrok instructions", "playit.gg instructions", "Back"])
+        .default(0)
+        .interact()?;
+
+    match choice {
+        0 => {
+            println!();
+            println!("  {} ngrok", style("◆").cyan().bold());
+            println!();
+            for line in info.ngrok_instructions().lines() {
+                println!("  {}", style(line).cyan());
+            }
+            println!();
+            println!("  Press Enter to open the ngrok download page in your browser...");
+            let _: String = Input::with_theme(&theme()).allow_empty(true).with_prompt("").interact_text()?;
+            let _ = open::that("https://ngrok.com/download");
+        }
+        1 => {
+            println!();
+            println!("  {} playit.gg", style("◆").cyan().bold());
+            println!();
+            for line in info.playit_instructions().lines() {
+                println!("  {}", style(line).cyan());
+            }
+            println!();
+            println!("  Press Enter to open the playit.gg download page...");
+            let _: String = Input::with_theme(&theme()).allow_empty(true).with_prompt("").interact_text()?;
+            let _ = open::that("https://playit.gg/download");
+        }
+        _ => {}
+    }
     Ok(())
 }
