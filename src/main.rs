@@ -1008,9 +1008,10 @@ async fn launch_preset(
     instance_mgr: &InstanceManager,
     backup_mgr: &BackupManager,
     config_mgr: &ConfigManager,
-    _crash_pattern_mgr: &CrashPatternManager,
+    crash_pattern_mgr: &CrashPatternManager,
     game_dir: &PathBuf,
 ) -> Result<()> {
+    let _ = crash_pattern_mgr; // reserved for future per-session recording
     let presets = preset_mgr.load_all().await?;
     if presets.is_empty() {
         println!("  No presets saved. Create one via Manage Presets first.");
@@ -2380,11 +2381,11 @@ async fn manage_worlds(
 
         let choice = Select::with_theme(&theme())
             .with_prompt("World Manager")
-            .items(&["Rename world", "Delete world", "Export world (zip)", "Open saves folder", "Back"])
+            .items(&["Rename world", "Delete world", "Export world (zip)", "Open saves folder", "World Info (seed/mode/day)", "Back"])
             .default(0)
             .interact()?;
 
-        if worlds.is_empty() && choice < 3 {
+        if worlds.is_empty() && choice < 4 {
             println!("  No worlds found.");
             continue;
         }
@@ -2428,6 +2429,23 @@ async fn manage_worlds(
                 }
             }
             3 => { let _ = open::that(&saves_dir); }
+            4 => {
+                // World Info — seed, game mode, day
+                if worlds.is_empty() { println!("  No worlds found."); continue; }
+                let labels: Vec<&str> = worlds.iter().map(|w| w.name.as_str()).collect();
+                let i = Select::with_theme(&theme()).with_prompt("Select world").items(&labels).default(0).interact()?;
+                let world_dir = &worlds[i].path;
+                let info = worldinfo::read(world_dir);
+                println!();
+                println!("  {} World Info — {}", style("◆").cyan(), style(&info.name).cyan().bold());
+                println!("  Seed      : {}", info.seed.map(|s| s.to_string()).unwrap_or_else(|| "unknown".into()));
+                println!("  Game mode : {}", style(info.game_mode_name()).cyan());
+                println!("  Day       : {}", info.day.map(|d| d.to_string()).unwrap_or_else(|| "unknown".into()));
+                if let Some(dv) = info.data_version {
+                    println!("  Data ver  : {}", style(dv).dim());
+                }
+                println!();
+            }
             _ => break,
         }
     }
