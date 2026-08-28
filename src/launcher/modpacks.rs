@@ -59,6 +59,20 @@ struct MrpackDeps {
     #[serde(rename = "fabric-loader")]
     fabric_loader: Option<String>,
     forge: Option<String>,
+    #[serde(rename = "quilt-loader")]
+    quilt_loader: Option<String>,
+    neoforge: Option<String>,
+}
+
+/// Which mod loader(s) (and versions) an mrpack requested, alongside the
+/// Minecraft version. A pack should only ever declare one loader, but the
+/// fields are independent options since the mrpack spec doesn't enforce that.
+#[derive(Debug, Default)]
+pub struct MrpackLoaders {
+    pub fabric: Option<String>,
+    pub forge: Option<String>,
+    pub quilt: Option<String>,
+    pub neoforge: Option<String>,
 }
 
 pub struct ModpackInstaller {
@@ -96,12 +110,13 @@ impl ModpackInstaller {
     }
 
     /// Download and install an mrpack into `instance_dir`.
-    /// Returns (minecraft_version, optional_fabric_version, optional_forge_version).
+    /// Returns (minecraft_version, loaders) where `loaders` holds whichever
+    /// of Fabric/Forge/Quilt/NeoForge the pack's index.json declared.
     pub async fn install_mrpack(
         &self,
         version: &ModpackVersion,
         instance_dir: &Path,
-    ) -> Result<(String, Option<String>, Option<String>)> {
+    ) -> Result<(String, MrpackLoaders)> {
         let file = version.files.iter().find(|f| f.primary || f.filename.ends_with(".mrpack"))
             .or_else(|| version.files.first())
             .ok_or_else(|| anyhow::anyhow!("No mrpack file found"))?;
@@ -125,8 +140,12 @@ impl ModpackInstaller {
         let mc_version = index.dependencies.as_ref()
             .and_then(|d| d.minecraft.clone())
             .unwrap_or_else(|| "unknown".to_string());
-        let fabric_version = index.dependencies.as_ref().and_then(|d| d.fabric_loader.clone());
-        let forge_version = index.dependencies.as_ref().and_then(|d| d.forge.clone());
+        let loaders = MrpackLoaders {
+            fabric: index.dependencies.as_ref().and_then(|d| d.fabric_loader.clone()),
+            forge: index.dependencies.as_ref().and_then(|d| d.forge.clone()),
+            quilt: index.dependencies.as_ref().and_then(|d| d.quilt_loader.clone()),
+            neoforge: index.dependencies.as_ref().and_then(|d| d.neoforge.clone()),
+        };
 
         tokio::fs::create_dir_all(instance_dir).await?;
 
@@ -171,6 +190,6 @@ impl ModpackInstaller {
             tokio::fs::write(&dest, data).await?;
         }
 
-        Ok((mc_version, fabric_version, forge_version))
+        Ok((mc_version, loaders))
     }
 }

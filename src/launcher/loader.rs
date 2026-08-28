@@ -116,6 +116,123 @@ pub async fn install_fabric(
     Ok(version_id)
 }
 
+// ── Quilt ─────────────────────────────────────────────────────────────────────
+//
+// Quilt's meta API is a near-drop-in replacement for Fabric's (same shape,
+// different host), since Quilt forked the Fabric loader/meta format.
+
+const QUILT_META: &str = "https://meta.quiltmc.org/v3";
+
+#[derive(Deserialize)]
+struct QuiltLoader {
+    version: String,
+}
+
+#[derive(Deserialize)]
+struct QuiltProfileResponse {
+    id: String,
+    #[serde(rename = "mainClass")]
+    main_class: String,
+    libraries: Vec<QuiltLibrary>,
+    arguments: Option<serde_json::Value>,
+    #[serde(rename = "minecraftArguments")]
+    minecraft_arguments: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct QuiltLibrary {
+    name: String,
+    url: String,
+}
+
+/// Returns a list of available Quilt loader versions for `mc_version`.
+pub async fn quilt_loader_versions(
+    http: &reqwest::Client,
+    mc_version: &str,
+) -> Result<Vec<String>> {
+    let url = format!("{}/versions/loader/{}", QUILT_META, mc_version);
+    let loaders: Vec<QuiltLoader> = http
+        .get(&url)
+        .send()
+        .await?
+        .error_for_status()
+        .context("Quilt meta API error — is this version supported by Quilt?")?
+        .json()
+        .await?;
+    Ok(loaders.into_iter().map(|l| l.version).collect())
+}
+
+/// Downloads the Quilt profile JSON and writes a merged version JSON to
+/// `versions/<mc_version>-quilt-<loader>/`.  Returns the new version id.
+pub async fn install_quilt(
+    http: &reqwest::Client,
+    game_dir: &Path,
+    mc_version: &str,
+    loader_version: &str,
+) -> Result<String> {
+    let profile_url = format!(
+        "{}/versions/loader/{}/{}/profile/json",
+        QUILT_META, mc_version, loader_version
+    );
+
+    let profile: QuiltProfileResponse = http
+        .get(&profile_url)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+
+    let version_id = profile.id.clone();
+    let version_dir = game_dir.join("versions").join(&version_id);
+    tokio::fs::create_dir_all(&version_dir).await?;
+
+    // Download each Quilt library into the libraries dir
+    for lib in &profile.libraries {
+        let dest = maven_path(game_dir, &lib.name);
+        if dest.exists() {
+            continue;
+        }
+        tokio::fs::create_dir_all(dest.parent().unwrap()).await?;
+        let url = maven_url(&lib.url, &lib.name);
+        let bytes = http.get(&url).send().await?.error_for_status()?.bytes().await?;
+        tokio::fs::write(&dest, &bytes).await?;
+    }
+
+    // Build a minimal version JSON that inherits from the base MC version
+    let mut json = serde_json::json!({
+        "id": version_id,
+        "type": "release",
+        "mainClass": profile.main_class,
+        "inheritsFrom": mc_version,
+        "libraries": profile.libraries.iter().map(|l| serde_json::json!({
+            "name": l.name,
+            "url": l.url,
+        })).collect::<Vec<_>>(),
+    });
+
+    if let Some(args) = profile.arguments {
+        json["arguments"] = args;
+    } else if let Some(legacy) = profile.minecraft_arguments {
+        json["minecraftArguments"] = serde_json::Value::String(legacy);
+    }
+
+    let json_path = version_dir.join(format!("{}.json", version_id));
+    tokio::fs::write(&json_path, serde_json::to_string_pretty(&json)?).await?;
+
+    // Symlink / copy the base MC jar so the classpath builder finds it
+    let base_jar = game_dir
+        .join("versions")
+        .join(mc_version)
+        .join(format!("{}.jar", mc_version));
+    let quilt_jar = version_dir.join(format!("{}.jar", version_id));
+    if base_jar.exists() && !quilt_jar.exists() {
+        tokio::fs::copy(&base_jar, &quilt_jar).await?;
+    }
+
+    Ok(version_id)
+}
+
 // ── Forge ─────────────────────────────────────────────────────────────────────
 
 const FORGE_MAVEN: &str = "https://maven.minecraftforge.net/net/minecraftforge/forge";
@@ -217,6 +334,102 @@ pub async fn install_forge(
     };
 
     Ok(version_id)
+}
+
+// ── NeoForge ─────────────────────────────────────────────────────────────────
+//
+// NeoForge publishes to its own Maven and (from 1.20.2 onward) dropped the
+// Minecraft-version prefix from its version numbers — a release for MC
+// 1.21.1 is versioned like "21.1.57", not "1.21.1-21.1.57". We derive that
+// prefix from `mc_version` to filter the shared maven-metadata.xml listing.
+
+const NEOFORGE_MAVEN: &str = "https://maven.neoforged.net/releases/net/neoforged/neoforge";
+
+/// Converts a Minecraft version like "1.21.1" into the NeoForge version
+/// prefix ("21.1") it publishes under. "1.21" (no patch) maps to "21.0".
+fn mc_version_to_neoforge_prefix(mc_version: &str) -> Option<String> {
+    let rest = mc_version.strip_prefix("1.")?;
+    let mut parts = rest.splitn(2, '.');
+    let minor = parts.next()?;
+    let patch = parts.next().unwrap_or("0");
+    Some(format!("{}.{}", minor, patch))
+}
+
+/// Returns available NeoForge versions for `mc_version` (newest first).
+/// Only supports MC 1.20.2+, which is the range NeoForge itself supports.
+pub async fn neoforge_versions(
+    http: &reqwest::Client,
+    mc_version: &str,
+) -> Result<Vec<String>> {
+    let prefix = mc_version_to_neoforge_prefix(mc_version)
+        .ok_or_else(|| anyhow::anyhow!("Unrecognized Minecraft version format: {}", mc_version))?;
+    let url = format!("{}/maven-metadata.xml", NEOFORGE_MAVEN);
+    let xml = http.get(&url).send().await?.error_for_status()?.text().await?;
+
+    // Simple prefix filter — no full XML parser needed
+    let dotted_prefix = format!("{}.", prefix);
+    let mut versions: Vec<String> = xml
+        .lines()
+        .filter_map(|l| {
+            let t = l.trim();
+            if t.starts_with("<version>") && t.ends_with("</version>") {
+                let v = t.trim_start_matches("<version>").trim_end_matches("</version>");
+                if v.starts_with(&dotted_prefix) {
+                    return Some(v.to_string());
+                }
+            }
+            None
+        })
+        .collect();
+    versions.reverse(); // newest first
+    Ok(versions)
+}
+
+/// Downloads the NeoForge installer jar and runs it with `--installClient`.
+/// Returns the installed NeoForge version id (e.g. `1.21.1-neoforge-21.1.57`).
+pub async fn install_neoforge(
+    http: &reqwest::Client,
+    game_dir: &Path,
+    mc_version: &str,
+    neoforge_version: &str, // e.g. "21.1.57"
+) -> Result<String> {
+    let installer_url = format!(
+        "{}/{ver}/neoforge-{ver}-installer.jar",
+        NEOFORGE_MAVEN,
+        ver = neoforge_version
+    );
+
+    let tmp_dir = std::env::temp_dir();
+    let installer_path = tmp_dir.join(format!("neoforge-{}-installer.jar", neoforge_version));
+
+    println!("  Downloading NeoForge installer...");
+    let bytes = http
+        .get(&installer_url)
+        .send()
+        .await?
+        .error_for_status()
+        .context("NeoForge installer not found — check the version string")?
+        .bytes()
+        .await?;
+    tokio::fs::write(&installer_path, &bytes).await?;
+
+    // Run the installer headlessly
+    let java = find_java();
+    let status = std::process::Command::new(&java)
+        .arg("-jar")
+        .arg(&installer_path)
+        .arg("--installClient")
+        .arg(game_dir)
+        .status()
+        .context("Failed to run NeoForge installer — is Java on PATH?")?;
+
+    let _ = std::fs::remove_file(&installer_path);
+
+    if !status.success() {
+        bail!("NeoForge installer exited with status {}", status);
+    }
+
+    Ok(format!("{}-neoforge-{}", mc_version, neoforge_version))
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────

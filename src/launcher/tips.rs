@@ -33,6 +33,8 @@ static TIPS: &[&str] = &[
     "The Auto-backup toggle zips your saves/ before every launch so crashes never lose progress.",
     "You can import any mrpack modpack from Modrinth directly — mods, configs, and overrides included.",
     "Fabric loader versions are fetched live from meta.fabricmc.net — always up to date.",
+    "Quilt is Fabric-compatible — most Fabric mods run fine on it via QFAPI.",
+    "NeoForge only supports Minecraft 1.20.2 and later — for older versions, use Forge.",
     "The screenshot gallery lets you copy images to clipboard or upload them to a paste service.",
 ];
 

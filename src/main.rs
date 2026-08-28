@@ -2016,7 +2016,7 @@ async fn install_mod_loader(
 
     let loader_choice = Select::with_theme(&theme())
         .with_prompt("Mod loader")
-        .items(&["Fabric", "Forge"])
+        .items(&["Fabric", "Forge", "Quilt", "NeoForge"])
         .default(0)
         .interact()?;
 
@@ -2042,7 +2042,7 @@ async fn install_mod_loader(
                 Err(e) => println!("  {} {}", style("✗").red(), e),
             }
         }
-        _ => {
+        1 => {
             println!("  {} Fetching Forge versions...", style("→").cyan());
             let versions = match loader::forge_versions(http, mc_version).await {
                 Ok(v) => v,
@@ -2059,6 +2059,48 @@ async fn install_mod_loader(
                 .interact()?;
             println!("  {} Running Forge installer (this may take a minute)...", style("→").cyan());
             match loader::install_forge(http, game_dir, &versions[f_idx]).await {
+                Ok(id) => println!("  {} Installed as version '{}'. Select it in Launch Game.", style("✓").green(), id),
+                Err(e) => println!("  {} {}", style("✗").red(), e),
+            }
+        }
+        2 => {
+            println!("  {} Fetching Quilt loader versions...", style("→").cyan());
+            let versions = match loader::quilt_loader_versions(http, mc_version).await {
+                Ok(v) => v,
+                Err(e) => { println!("  {} {}", style("✗").red(), e); return Ok(()); }
+            };
+            if versions.is_empty() {
+                println!("  No Quilt loader versions found for {}.", mc_version);
+                return Ok(());
+            }
+            let l_idx = Select::with_theme(&theme())
+                .with_prompt("Loader version")
+                .items(&versions)
+                .default(0)
+                .interact()?;
+            println!("  {} Installing Quilt {}...", style("→").cyan(), versions[l_idx]);
+            match loader::install_quilt(http, game_dir, mc_version, &versions[l_idx]).await {
+                Ok(id) => println!("  {} Installed as version '{}'. Select it in Launch Game.", style("✓").green(), id),
+                Err(e) => println!("  {} {}", style("✗").red(), e),
+            }
+        }
+        _ => {
+            println!("  {} Fetching NeoForge versions...", style("→").cyan());
+            let versions = match loader::neoforge_versions(http, mc_version).await {
+                Ok(v) => v,
+                Err(e) => { println!("  {} {}", style("✗").red(), e); return Ok(()); }
+            };
+            if versions.is_empty() {
+                println!("  No NeoForge versions found for {}. NeoForge only supports Minecraft 1.20.2+.", mc_version);
+                return Ok(());
+            }
+            let nf_idx = Select::with_theme(&theme())
+                .with_prompt("NeoForge version")
+                .items(&versions)
+                .default(0)
+                .interact()?;
+            println!("  {} Running NeoForge installer (this may take a minute)...", style("→").cyan());
+            match loader::install_neoforge(http, game_dir, mc_version, &versions[nf_idx]).await {
                 Ok(id) => println!("  {} Installed as version '{}'. Select it in Launch Game.", style("✓").green(), id),
                 Err(e) => println!("  {} {}", style("✗").red(), e),
             }
@@ -2612,11 +2654,13 @@ async fn install_modpack(
 
     let inst_dir = instance_mgr.instance_dir(inst_name.trim());
     match installer.install_mrpack(&versions[v], &inst_dir).await {
-        Ok((mc_ver, fabric, forge)) => {
+        Ok((mc_ver, loaders)) => {
             println!("  {} Modpack installed to '{}'", style("✓").green(), inst_name.trim());
             println!("     Minecraft: {}", mc_ver);
-            if let Some(f) = fabric { println!("     Fabric loader: {}", f); }
-            if let Some(f) = forge  { println!("     Forge: {}", f); }
+            if let Some(f) = loaders.fabric   { println!("     Fabric loader: {}", f); }
+            if let Some(f) = loaders.forge    { println!("     Forge: {}", f); }
+            if let Some(f) = loaders.quilt    { println!("     Quilt loader: {}", f); }
+            if let Some(f) = loaders.neoforge { println!("     NeoForge: {}", f); }
             println!("  {} Install the matching Minecraft version and mod loader, then create an instance pointing to this directory.", style("ℹ").cyan());
         }
         Err(e) => println!("  {} {}", style("✗").red(), e),

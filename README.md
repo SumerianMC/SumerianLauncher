@@ -14,8 +14,8 @@
   - **Instance Profiles** — Per-instance overrides for optimization profile, Java binary, resolution, and custom JVM args stored as `instance_profile.json`.
 - **Backup Manager** — Zip and restore the `saves/` directory of any instance with timestamped backups. Optional **auto-backup on launch** (toggle in Settings).
 - **Mod Manager** — Search Modrinth by query + game version, browse results, pick a version, and download directly into any instance's `mods/` folder. List and remove installed mods. **Automatic dependency resolution** — required dependencies are fetched and installed alongside the selected mod.
-- **Modpack Installer** — Search Modrinth for modpacks, select a version, and install the full `.mrpack` (overrides + mod files) into a named instance directory. Reports the required Minecraft version, Fabric loader, and Forge version.
-- **Mod Loader Installer** — Install Fabric (via meta.fabricmc.net) or Forge (via official installer jar) directly from the launcher without leaving the CLI.
+- **Modpack Installer** — Search Modrinth for modpacks, select a version, and install the full `.mrpack` (overrides + mod files) into a named instance directory. Reports the required Minecraft version and whichever of Fabric, Forge, Quilt, or NeoForge the pack declares.
+- **Mod Loader Installer** — Install Fabric or Quilt (via their meta APIs), or Forge or NeoForge (via their official installer jars), directly from the launcher without leaving the CLI.
 - **Mod Update Checker** — SHA1-hash each installed jar against Modrinth, detect newer versions, and apply updates in one step.
 - **Server Browser** — Save favorite servers with name, address, and notes. TCP-pings each server and shows latency (or "offline") in the list.
 - **Launch Presets** — Save named launch configurations with version, optimization profile, texture pack, shader preset, resolution, server quick-join, custom JVM args, and instance binding. Full create/edit/delete wizard.
@@ -109,7 +109,7 @@ Sumerian/
     │   ├── downloader.rs          # SHA1-verified downloader, semaphore-capped assets
     │   ├── history.rs             # Launch records (last 100)
     │   ├── instances.rs           # Isolated instance dirs, clone, notes, mod profiles
-    │   ├── loader.rs              # Fabric + Forge mod loader installer
+    │   ├── loader.rs              # Fabric + Forge + Quilt + NeoForge mod loader installer
     │   ├── manifest.rs            # Mojang version manifest + meta fetching
     │   ├── mod_updates.rs         # Modrinth hash-based update checker
     │   ├── modpacks.rs            # Modrinth mrpack modpack installer
@@ -231,10 +231,12 @@ If no matching Java is found, Sumerian automatically downloads and extracts Temu
 
 ## Mod Loader Installation
 
-Fabric and Forge can be installed directly from the "Install Mod Loader" menu:
+Fabric, Forge, Quilt, and NeoForge can be installed directly from the "Install Mod Loader" menu:
 
 - **Fabric** — fetches available loader versions from meta.fabricmc.net, writes an inheriting version JSON, and downloads loader libraries into `game/libraries/`.
 - **Forge** — downloads the official Forge installer jar and runs it headlessly with `--installClient`.
+- **Quilt** — fetches available loader versions from meta.quiltmc.org, writes an inheriting version JSON, and downloads loader libraries into `game/libraries/`. Quilt is Fabric-compatible, so most Fabric mods (and Fabric API, via QSL/QFAPI) work unmodified.
+- **NeoForge** — downloads the official NeoForge installer jar from maven.neoforged.net and runs it headlessly with `--installClient`. Only supports Minecraft 1.20.2 and newer (NeoForge is a post-1.20.1 fork of Forge).
 
 ## Modpack Installation
 
@@ -281,6 +283,6 @@ Accessible from the main menu under **Settings**:
 ## Known Limitations
 
 - **Shader rendering** requires OptiFine or Iris — Sumerian injects preset files but does not bundle GLSL shaders.
-- **Forge headless install** may fail on some Forge versions that require GUI interaction.
+- **Forge/NeoForge headless install** may fail on some versions that require GUI interaction.
 - **Very old versions** (Classic, early Alpha) may not have full asset downloads available from Mojang's CDN.
 - **Modpack auto-install** does not automatically install the required Minecraft version or mod loader — those must be installed separately via the launcher menus.
