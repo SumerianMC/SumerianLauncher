@@ -1,0 +1,9 @@
+{
+  "name": "Vanilla Plus",
+  "shadow_quality": 2,
+  "water_reflections": true,
+  "bloom": false,
+  "ambient_occlusion": true,
+  "antialiasing": "FXAA",
+  "render_distance_boost": 2
+}
