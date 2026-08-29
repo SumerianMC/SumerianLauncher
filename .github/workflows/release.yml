@@ -79,7 +79,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
 
-  build-macos:
+  build-macos-intel:
     needs: create-release
     runs-on: macos-latest
     permissions:
@@ -112,14 +112,59 @@ jobs:
 
       - name: Package .dmg
         run: |
-          cp target/x86_64-apple-darwin/release/sumerian sumerian-macos
-          hdiutil create -volname Sumerian -srcfolder Sumerian.app -ov -format UDZO sumerian-macos.dmg
+          cp target/x86_64-apple-darwin/release/sumerian sumerian-macos-intel
+          hdiutil create -volname Sumerian -srcfolder Sumerian.app -ov -format UDZO sumerian-macos-intel.dmg
 
       - name: Upload
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            sumerian-macos
-            sumerian-macos.dmg
+            sumerian-macos-intel
+            sumerian-macos-intel.dmg
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+
+  build-macos-arm:
+    needs: create-release
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+      - name: Build
+        run: cargo build --release --target aarch64-apple-darwin
+
+      - name: Package .app
+        run: |
+          mkdir -p Sumerian.app/Contents/MacOS
+          cp target/aarch64-apple-darwin/release/sumerian Sumerian.app/Contents/MacOS/sumerian
+          cat <<EOF > Sumerian.app/Contents/Info.plist
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key><string>Sumerian</string>
+            <key>CFBundleExecutable</key><string>sumerian</string>
+            <key>CFBundleIdentifier</key><string>com.sumerianmc.sumerian</string>
+            <key>CFBundleVersion</key><string>${{ github.ref_name }}</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+          </dict>
+          </plist>
+          EOF
+
+      - name: Package .dmg
+        run: |
+          cp target/aarch64-apple-darwin/release/sumerian sumerian-macos-arm64
+          hdiutil create -volname Sumerian -srcfolder Sumerian.app -ov -format UDZO sumerian-macos-arm64.dmg
+
+      - name: Upload
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            sumerian-macos-arm64
+            sumerian-macos-arm64.dmg
         env:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
