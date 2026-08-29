@@ -1,0 +1,151 @@
+<?xml version='1.0' encoding='windows-1252'?>
+<!--
+  Sumerian Launcher — WiX installer definition.
+  Used by `cargo wix` to build sumerian-windows-x64.msi.
+
+  Docs: https://wixtoolset.org/documentation/manual/v3/
+-->
+
+<Wix xmlns='http://schemas.microsoft.com/wix/2006/wi'>
+
+    <Product
+        Id='*'
+        Name='Sumerian'
+        UpgradeCode='6B9A2B3E-6F5B-4B1C-9E5A-2D9C7F1C0A11'
+        Manufacturer='Sumerian Client'
+        Language='1033'
+        Codepage='1252'
+        Version='$(var.Version)'>
+
+        <Package Id='*'
+            Keywords='Installer'
+            Description='Sumerian Minecraft Launcher Installer'
+            Manufacturer='Sumerian Client'
+            InstallerVersion='450'
+            Languages='1033'
+            Compressed='yes'
+            InstallScope='perMachine'
+            SummaryCodepage='1252'/>
+
+        <MajorUpgrade
+            Schedule='afterInstallInitialize'
+            DowngradeErrorMessage='A newer version of Sumerian is already installed. Setup will now exit.'/>
+
+        <Media Id='1' Cabinet='media1.cab' EmbedCab='yes' DiskPrompt='CD-ROM #1'/>
+        <Property Id='DiskPrompt' Value='Sumerian Installation'/>
+
+        <Directory Id='TARGETDIR' Name='SourceDir'>
+            <Directory Id='ProgramFiles64Folder'>
+                <Directory Id='APPLICATIONFOLDER' Name='Sumerian'>
+
+                    <Component Id='binary0' Guid='*'>
+                        <File
+                            Id='exe0'
+                            Name='sumerian.exe'
+                            DiskId='1'
+                            Source='$(var.CargoTargetBinDir)\sumerian.exe'
+                            KeyPath='yes'/>
+                    </Component>
+
+                    <Component Id='License' Guid='*'>
+                        <File
+                            Id='LicenseFile'
+                            Name='LICENSE.rtf'
+                            DiskId='1'
+                            Source='wix\License.rtf'
+                            KeyPath='yes'/>
+                    </Component>
+
+                </Directory>
+            </Directory>
+
+            <Directory Id='ProgramMenuFolder'>
+                <Directory Id='ApplicationProgramsFolder' Name='Sumerian'>
+                    <Component Id='ApplicationShortcut' Guid='*'>
+                        <Shortcut
+                            Id='ApplicationStartMenuShortcut'
+                            Name='Sumerian'
+                            Description='Launch Sumerian'
+                            Target='[APPLICATIONFOLDER]sumerian.exe'
+                            WorkingDirectory='APPLICATIONFOLDER'/>
+                        <Shortcut
+                            Id='UninstallShortcut'
+                            Name='Uninstall Sumerian'
+                            Target='[SystemFolder]msiexec.exe'
+                            Arguments='/x [ProductCode]'
+                            Description='Uninstalls Sumerian'/>
+                        <RemoveFolder Id='ApplicationProgramsFolder' On='uninstall'/>
+                        <RegistryValue
+                            Root='HKCU'
+                            Key='Software\SumerianClient\Sumerian'
+                            Name='installed'
+                            Type='integer'
+                            Value='1'
+                            KeyPath='yes'/>
+                    </Component>
+                </Directory>
+            </Directory>
+
+            <Directory Id='DesktopFolder' Name='Desktop'>
+                <Component Id='DesktopShortcut' Guid='*'>
+                    <Shortcut
+                        Id='DesktopShortcut'
+                        Name='Sumerian'
+                        Description='Launch Sumerian'
+                        Target='[APPLICATIONFOLDER]sumerian.exe'
+                        WorkingDirectory='APPLICATIONFOLDER'/>
+                    <RegistryValue
+                        Root='HKCU'
+                        Key='Software\SumerianClient\Sumerian'
+                        Name='desktop_shortcut'
+                        Type='integer'
+                        Value='1'
+                        KeyPath='yes'/>
+                </Component>
+            </Directory>
+        </Directory>
+
+        <Feature
+            Id='Binaries'
+            Title='Application'
+            Description='Installs the Sumerian executable.'
+            Level='1'
+            ConfigurableDirectory='APPLICATIONFOLDER'
+            AllowAdvertise='no'
+            Display='expand'
+            Absent='disallow'>
+            <ComponentRef Id='binary0'/>
+            <ComponentRef Id='License'/>
+        </Feature>
+
+        <Feature
+            Id='StartMenuShortcut'
+            Title='Start Menu Shortcut'
+            Description='Adds a Start Menu shortcut for Sumerian.'
+            Level='1'>
+            <ComponentRef Id='ApplicationShortcut'/>
+        </Feature>
+
+        <Feature
+            Id='DesktopShortcutFeature'
+            Title='Desktop Shortcut'
+            Description='Adds a Desktop shortcut for Sumerian.'
+            Level='1'>
+            <ComponentRef Id='DesktopShortcut'/>
+        </Feature>
+
+        <SetProperty Id='ARPINSTALLLOCATION' Value='[APPLICATIONFOLDER]' After='CostFinalize'/>
+
+        <Property Id='ARPPRODUCTICON' Value='ProductICON'/>
+        <Icon Id='ProductICON' SourceFile='wix\sumerian.ico'/>
+
+        <Property Id='ARPHELPLINK' Value='https://github.com/'/>
+
+        <UI>
+            <UIRef Id='WixUI_FeatureTree'/>
+        </UI>
+
+        <WixVariable Id='WixUILicenseRtf' Value='wix\License.rtf'/>
+
+    </Product>
+</Wix>

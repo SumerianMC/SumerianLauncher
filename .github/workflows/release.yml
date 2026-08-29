@@ -18,7 +18,10 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
 
-  build-windows:
+  # ---------------------------------------------------------------------
+  # WINDOWS x86_64 — exe + NSIS installer + MSI
+  # ---------------------------------------------------------------------
+  build-windows-x64:
     needs: create-release
     runs-on: windows-latest
     permissions:
@@ -28,16 +31,116 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
+
       - name: Build
         run: cargo build --release --target x86_64-pc-windows-msvc
+
+      - name: Rename exe
+        run: cp target/x86_64-pc-windows-msvc/release/sumerian.exe sumerian-windows-x64.exe
+
+      - name: Install cargo-wix
+        run: cargo install cargo-wix --locked
+
+      - name: Build MSI
+        run: |
+          cargo wix init --force
+          cargo wix --target x86_64-pc-windows-msvc --nocapture --output sumerian-windows-x64.msi
+
+      - name: Install NSIS
+        run: choco install nsis -y
+
+      - name: Build NSIS installer
+        run: |
+          @"
+          OutFile "sumerian-windows-x64-setup.exe"
+          InstallDir "\$PROGRAMFILES64\Sumerian"
+          Page directory
+          Page instfiles
+          Section
+            SetOutPath "\$INSTDIR"
+            File "target\x86_64-pc-windows-msvc\release\sumerian.exe"
+            CreateShortcut "\$SMPROGRAMS\Sumerian.lnk" "\$INSTDIR\sumerian.exe"
+            WriteUninstaller "\$INSTDIR\uninstall.exe"
+          SectionEnd
+          Section "Uninstall"
+            Delete "\$INSTDIR\sumerian.exe"
+            Delete "\$INSTDIR\uninstall.exe"
+            Delete "\$SMPROGRAMS\Sumerian.lnk"
+            RMDir "\$INSTDIR"
+          SectionEnd
+          "@ | Out-File -Encoding ASCII installer.nsi
+          makensis installer.nsi
+
       - name: Upload
         uses: softprops/action-gh-release@v2
         with:
-          files: target/x86_64-pc-windows-msvc/release/sumerian.exe
+          files: |
+            sumerian-windows-x64.exe
+            sumerian-windows-x64.msi
+            sumerian-windows-x64-setup.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
 
-  build-linux:
+  # ---------------------------------------------------------------------
+  # WINDOWS ARM64 — exe + NSIS installer
+  # (cargo-wix/WiX toolset does not reliably cross-target arm64 MSIs,
+  #  so ARM64 ships as raw exe + NSIS installer only)
+  # ---------------------------------------------------------------------
+  build-windows-arm64:
+    needs: create-release
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-pc-windows-msvc
+
+      - name: Build
+        run: cargo build --release --target aarch64-pc-windows-msvc
+
+      - name: Rename exe
+        run: cp target/aarch64-pc-windows-msvc/release/sumerian.exe sumerian-windows-arm64.exe
+
+      - name: Install NSIS
+        run: choco install nsis -y
+
+      - name: Build NSIS installer
+        run: |
+          @"
+          OutFile "sumerian-windows-arm64-setup.exe"
+          InstallDir "\$PROGRAMFILES64\Sumerian"
+          Page directory
+          Page instfiles
+          Section
+            SetOutPath "\$INSTDIR"
+            File "target\aarch64-pc-windows-msvc\release\sumerian.exe"
+            CreateShortcut "\$SMPROGRAMS\Sumerian.lnk" "\$INSTDIR\sumerian.exe"
+            WriteUninstaller "\$INSTDIR\uninstall.exe"
+          SectionEnd
+          Section "Uninstall"
+            Delete "\$INSTDIR\sumerian.exe"
+            Delete "\$INSTDIR\uninstall.exe"
+            Delete "\$SMPROGRAMS\Sumerian.lnk"
+            RMDir "\$INSTDIR"
+          SectionEnd
+          "@ | Out-File -Encoding ASCII installer.nsi
+          makensis installer.nsi
+
+      - name: Upload
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            sumerian-windows-arm64.exe
+            sumerian-windows-arm64-setup.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+
+  # ---------------------------------------------------------------------
+  # LINUX x86_64 — tar.gz, .deb, .rpm, AppImage
+  # ---------------------------------------------------------------------
+  build-linux-x64:
     needs: create-release
     runs-on: ubuntu-latest
     permissions:
@@ -47,18 +150,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-gnu
+
       - name: Build
         run: cargo build --release --target x86_64-unknown-linux-gnu
 
       - name: Package tar.gz
         run: |
-          cp target/x86_64-unknown-linux-gnu/release/sumerian sumerian
-          tar -czf sumerian-linux.tar.gz sumerian
+          cp target/x86_64-unknown-linux-gnu/release/sumerian sumerian-linux-x64
+          tar -czf sumerian-linux-x64.tar.gz sumerian-linux-x64
 
       - name: Package .deb
         run: |
           mkdir -p deb/usr/local/bin
-          cp sumerian deb/usr/local/bin/sumerian
+          cp target/x86_64-unknown-linux-gnu/release/sumerian deb/usr/local/bin/sumerian
           mkdir -p deb/DEBIAN
           cat <<EOF > deb/DEBIAN/control
           Package: sumerian
@@ -67,18 +171,240 @@ jobs:
           Maintainer: Sumerian Client
           Description: A Rust Minecraft launcher
           EOF
-          dpkg-deb --build deb sumerian-linux.deb
+          dpkg-deb --build deb sumerian-linux-x64.deb
+
+      - name: Package .rpm
+        run: |
+          sudo apt-get update && sudo apt-get install -y rpm
+          mkdir -p rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
+          mkdir -p rpmbuild/BUILDROOT/sumerian-${GITHUB_REF_NAME#v}-1.x86_64/usr/local/bin
+          cp target/x86_64-unknown-linux-gnu/release/sumerian rpmbuild/BUILDROOT/sumerian-${GITHUB_REF_NAME#v}-1.x86_64/usr/local/bin/sumerian
+          cat <<EOF > rpmbuild/SPECS/sumerian.spec
+          Name: sumerian
+          Version: ${GITHUB_REF_NAME#v}
+          Release: 1
+          Summary: A Rust Minecraft launcher
+          License: MIT
+          BuildArch: x86_64
+
+          %description
+          A modern Rust Minecraft launcher.
+
+          %files
+          /usr/local/bin/sumerian
+          EOF
+          rpmbuild --define "_topdir $(pwd)/rpmbuild" -bb rpmbuild/SPECS/sumerian.spec --buildroot "$(pwd)/rpmbuild/BUILDROOT/sumerian-${GITHUB_REF_NAME#v}-1.x86_64"
+          cp rpmbuild/RPMS/x86_64/*.rpm sumerian-linux-x64.rpm
+
+      - name: Package AppImage
+        run: |
+          wget -q https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage -O appimagetool
+          chmod +x appimagetool
+          mkdir -p AppDir/usr/bin
+          cp target/x86_64-unknown-linux-gnu/release/sumerian AppDir/usr/bin/sumerian
+          cat <<EOF > AppDir/sumerian.desktop
+          [Desktop Entry]
+          Name=Sumerian
+          Exec=sumerian
+          Icon=sumerian
+          Type=Application
+          Categories=Game;
+          EOF
+          convert -size 256x256 xc:transparent AppDir/sumerian.png 2>/dev/null || touch AppDir/sumerian.png
+          cat <<'EOF' > AppDir/AppRun
+          #!/bin/sh
+          HERE="$(dirname "$(readlink -f "${0}")")"
+          exec "${HERE}/usr/bin/sumerian" "$@"
+          EOF
+          chmod +x AppDir/AppRun
+          ARCH=x86_64 ./appimagetool AppDir sumerian-linux-x64.AppImage
 
       - name: Upload
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            sumerian
-            sumerian-linux.tar.gz
-            sumerian-linux.deb
+            sumerian-linux-x64
+            sumerian-linux-x64.tar.gz
+            sumerian-linux-x64.deb
+            sumerian-linux-x64.rpm
+            sumerian-linux-x64.AppImage
         env:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
 
+  # ---------------------------------------------------------------------
+  # LINUX ARM64 — tar.gz, .deb, .rpm, AppImage (cross-compiled)
+  # ---------------------------------------------------------------------
+  build-linux-arm64:
+    needs: create-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+
+      - name: Install cross-compilation toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Configure linker for aarch64
+        run: |
+          mkdir -p .cargo
+          cat <<EOF >> .cargo/config.toml
+          [target.aarch64-unknown-linux-gnu]
+          linker = "aarch64-linux-gnu-gcc"
+          EOF
+
+      - name: Build
+        run: cargo build --release --target aarch64-unknown-linux-gnu
+
+      - name: Package tar.gz
+        run: |
+          cp target/aarch64-unknown-linux-gnu/release/sumerian sumerian-linux-arm64
+          tar -czf sumerian-linux-arm64.tar.gz sumerian-linux-arm64
+
+      - name: Package .deb
+        run: |
+          mkdir -p deb/usr/local/bin
+          cp target/aarch64-unknown-linux-gnu/release/sumerian deb/usr/local/bin/sumerian
+          mkdir -p deb/DEBIAN
+          cat <<EOF > deb/DEBIAN/control
+          Package: sumerian
+          Version: ${GITHUB_REF_NAME#v}
+          Architecture: arm64
+          Maintainer: Sumerian Client
+          Description: A Rust Minecraft launcher
+          EOF
+          dpkg-deb --build deb sumerian-linux-arm64.deb
+
+      - name: Package .rpm
+        run: |
+          sudo apt-get install -y rpm
+          mkdir -p rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
+          mkdir -p rpmbuild/BUILDROOT/sumerian-${GITHUB_REF_NAME#v}-1.aarch64/usr/local/bin
+          cp target/aarch64-unknown-linux-gnu/release/sumerian rpmbuild/BUILDROOT/sumerian-${GITHUB_REF_NAME#v}-1.aarch64/usr/local/bin/sumerian
+          cat <<EOF > rpmbuild/SPECS/sumerian.spec
+          Name: sumerian
+          Version: ${GITHUB_REF_NAME#v}
+          Release: 1
+          Summary: A Rust Minecraft launcher
+          License: MIT
+          BuildArch: aarch64
+
+          %description
+          A modern Rust Minecraft launcher.
+
+          %files
+          /usr/local/bin/sumerian
+          EOF
+          rpmbuild --define "_topdir $(pwd)/rpmbuild" --target aarch64 -bb rpmbuild/SPECS/sumerian.spec --buildroot "$(pwd)/rpmbuild/BUILDROOT/sumerian-${GITHUB_REF_NAME#v}-1.aarch64"
+          cp rpmbuild/RPMS/aarch64/*.rpm sumerian-linux-arm64.rpm
+
+      - name: Package AppImage
+        run: |
+          wget -q https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage -O appimagetool
+          chmod +x appimagetool
+          mkdir -p AppDir/usr/bin
+          cp target/aarch64-unknown-linux-gnu/release/sumerian AppDir/usr/bin/sumerian
+          cat <<EOF > AppDir/sumerian.desktop
+          [Desktop Entry]
+          Name=Sumerian
+          Exec=sumerian
+          Icon=sumerian
+          Type=Application
+          Categories=Game;
+          EOF
+          convert -size 256x256 xc:transparent AppDir/sumerian.png 2>/dev/null || touch AppDir/sumerian.png
+          cat <<'EOF' > AppDir/AppRun
+          #!/bin/sh
+          HERE="$(dirname "$(readlink -f "${0}")")"
+          exec "${HERE}/usr/bin/sumerian" "$@"
+          EOF
+          chmod +x AppDir/AppRun
+          ARCH=aarch64 ./appimagetool AppDir sumerian-linux-arm64.AppImage
+
+      - name: Upload
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            sumerian-linux-arm64
+            sumerian-linux-arm64.tar.gz
+            sumerian-linux-arm64.deb
+            sumerian-linux-arm64.rpm
+            sumerian-linux-arm64.AppImage
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+
+  # ---------------------------------------------------------------------
+  # LINUX FLATPAK (built from the x86_64 build output)
+  # ---------------------------------------------------------------------
+  build-linux-flatpak:
+    needs: create-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Build
+        run: cargo build --release --target x86_64-unknown-linux-gnu
+
+      - name: Install flatpak tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder
+          sudo flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+          sudo flatpak install -y flathub org.freedesktop.Platform//23.08 org.freedesktop.Sdk//23.08
+
+      - name: Assemble flatpak manifest
+        run: |
+          mkdir -p flatpak-build
+          cp target/x86_64-unknown-linux-gnu/release/sumerian flatpak-build/sumerian
+          cat <<EOF > flatpak-build/com.sumerianmc.sumerian.yml
+          app-id: com.sumerianmc.sumerian
+          runtime: org.freedesktop.Platform
+          runtime-version: '23.08'
+          sdk: org.freedesktop.Sdk
+          command: sumerian
+          finish-args:
+            - --share=network
+            - --share=ipc
+            - --socket=x11
+            - --socket=wayland
+            - --device=dri
+            - --filesystem=home
+          modules:
+            - name: sumerian
+              buildsystem: simple
+              build-commands:
+                - install -Dm755 sumerian /app/bin/sumerian
+              sources:
+                - type: file
+                  path: sumerian
+          EOF
+
+      - name: Build flatpak
+        run: |
+          cd flatpak-build
+          flatpak-builder --force-clean --repo=repo build com.sumerianmc.sumerian.yml
+          flatpak build-bundle repo ../sumerian-linux-x64.flatpak com.sumerianmc.sumerian
+
+      - name: Upload
+        uses: softprops/action-gh-release@v2
+        with:
+          files: sumerian-linux-x64.flatpak
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+
+  # ---------------------------------------------------------------------
+  # MACOS INTEL (x86_64)
+  # ---------------------------------------------------------------------
   build-macos-intel:
     needs: create-release
     runs-on: macos-latest
@@ -89,14 +415,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-apple-darwin
+
       - name: Build
         run: cargo build --release --target x86_64-apple-darwin
 
       - name: Package .app
         run: |
-          mkdir -p Sumerian.app/Contents/MacOS
-          cp target/x86_64-apple-darwin/release/sumerian Sumerian.app/Contents/MacOS/sumerian
-          cat <<EOF > Sumerian.app/Contents/Info.plist
+          mkdir -p Sumerian-intel.app/Contents/MacOS
+          cp target/x86_64-apple-darwin/release/sumerian Sumerian-intel.app/Contents/MacOS/sumerian
+          cat <<EOF > Sumerian-intel.app/Contents/Info.plist
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
@@ -113,7 +440,7 @@ jobs:
       - name: Package .dmg
         run: |
           cp target/x86_64-apple-darwin/release/sumerian sumerian-macos-intel
-          hdiutil create -volname Sumerian -srcfolder Sumerian.app -ov -format UDZO sumerian-macos-intel.dmg
+          hdiutil create -volname Sumerian -srcfolder Sumerian-intel.app -ov -format UDZO sumerian-macos-intel.dmg
 
       - name: Upload
         uses: softprops/action-gh-release@v2
@@ -124,6 +451,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
 
+  # ---------------------------------------------------------------------
+  # MACOS ARM64 (native Apple Silicon)
+  # ---------------------------------------------------------------------
   build-macos-arm:
     needs: create-release
     runs-on: macos-latest
@@ -134,14 +464,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin
+
       - name: Build
         run: cargo build --release --target aarch64-apple-darwin
 
       - name: Package .app
         run: |
-          mkdir -p Sumerian.app/Contents/MacOS
-          cp target/aarch64-apple-darwin/release/sumerian Sumerian.app/Contents/MacOS/sumerian
-          cat <<EOF > Sumerian.app/Contents/Info.plist
+          mkdir -p Sumerian-arm64.app/Contents/MacOS
+          cp target/aarch64-apple-darwin/release/sumerian Sumerian-arm64.app/Contents/MacOS/sumerian
+          cat <<EOF > Sumerian-arm64.app/Contents/Info.plist
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
@@ -158,7 +489,7 @@ jobs:
       - name: Package .dmg
         run: |
           cp target/aarch64-apple-darwin/release/sumerian sumerian-macos-arm64
-          hdiutil create -volname Sumerian -srcfolder Sumerian.app -ov -format UDZO sumerian-macos-arm64.dmg
+          hdiutil create -volname Sumerian -srcfolder Sumerian-arm64.app -ov -format UDZO sumerian-macos-arm64.dmg
 
       - name: Upload
         uses: softprops/action-gh-release@v2
@@ -166,5 +497,64 @@ jobs:
           files: |
             sumerian-macos-arm64
             sumerian-macos-arm64.dmg
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+
+  # ---------------------------------------------------------------------
+  # MACOS UNIVERSAL BINARY (Intel + Apple Silicon combined via lipo)
+  # ---------------------------------------------------------------------
+  build-macos-universal:
+    needs: create-release
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+
+      - name: Build both architectures
+        run: |
+          cargo build --release --target x86_64-apple-darwin
+          cargo build --release --target aarch64-apple-darwin
+
+      - name: Create universal binary with lipo
+        run: |
+          lipo -create \
+            target/x86_64-apple-darwin/release/sumerian \
+            target/aarch64-apple-darwin/release/sumerian \
+            -output sumerian-universal
+          lipo -info sumerian-universal
+
+      - name: Package .app
+        run: |
+          mkdir -p Sumerian.app/Contents/MacOS
+          cp sumerian-universal Sumerian.app/Contents/MacOS/sumerian
+          cat <<EOF > Sumerian.app/Contents/Info.plist
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key><string>Sumerian</string>
+            <key>CFBundleExecutable</key><string>sumerian</string>
+            <key>CFBundleIdentifier</key><string>com.sumerianmc.sumerian</string>
+            <key>CFBundleVersion</key><string>${{ github.ref_name }}</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+          </dict>
+          </plist>
+          EOF
+
+      - name: Package .dmg
+        run: |
+          cp sumerian-universal sumerian-macos-universal
+          hdiutil create -volname Sumerian -srcfolder Sumerian.app -ov -format UDZO sumerian-macos-universal.dmg
+
+      - name: Upload
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            sumerian-macos-universal
+            sumerian-macos-universal.dmg
         env:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
