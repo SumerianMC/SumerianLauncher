@@ -17,19 +17,25 @@ use launcher::{
     benchmark,
     config::ConfigManager,
     configexport,
+    configsnapshot::ConfigSnapshotManager,
     conflicts,
     crashpatterns::CrashPatternManager,
+    doctor,
     downloader::Downloader,
     friends::{Friend, FriendList},
     history::{HistoryManager, LaunchRecord},
     instancediff,
     instances::{InstanceManager, InstanceProfile, WorldManager},
     jvmadvisor,
+    jvmpresets::JvmPresetManager,
     lanscanner,
     leakdetector,
-    loader,    manifest::VersionManifest,
+    loader,
+    logtail,
+    manifest::VersionManifest,
     mod_updates,
     modpacks::ModpackInstaller,
+    modprofiles::ModProfileManager,
     mods::ModManager,
     news,
     portforward,
@@ -122,6 +128,50 @@ fn print_banner() {
 async fn main() -> Result<()> {
     print_banner();
 
+    // ── Quick-launch: `sumerian --last` ─────────────────────────────────────
+    // Re-launch the most recent session without navigating any menus.
+    {
+        let args: Vec<String> = std::env::args().collect();
+        if args.iter().any(|a| a == "--last") {
+            let base_ql = base_dir();
+            let game_ql = game_dir();
+            let http_ql = reqwest::Client::builder()
+                .user_agent(concat!("SumerianClient/", env!("CARGO_PKG_VERSION")))
+                .build()?;
+            let history_ql = HistoryManager::new(&base_ql);
+            let version_mgr_ql = VersionManager::new(&game_ql);
+            let downloader_ql = Downloader::new(http_ql.clone(), game_ql.clone());
+            let auth_ql = Authenticator::new(http_ql.clone(), &base_ql);
+            let profiles_ql = ProfileManager::new(&base_ql);
+            let instance_mgr_ql = InstanceManager::new(&base_ql);
+            let backup_mgr_ql = BackupManager::new(&base_ql);
+            let config_mgr_ql = ConfigManager::new(&base_ql);
+            let texture_mgr_ql = TextureManager::new(&base_ql);
+            texture_mgr_ql.init().await?;
+            let shader_mgr_ql = ShaderManager::new(&bundled_shaders_dir());
+            let crash_mgr_ql = CrashPatternManager::new(&base_ql);
+            let records = history_ql.load().await?;
+            if let Some(last) = records.last() {
+                println!(
+                    "  {} Quick-launching last session: {} ({})",
+                    style("→").cyan(),
+                    style(&last.version_id).cyan().bold(),
+                    last.username
+                );
+                println!();
+                launch_game(
+                    &http_ql, &downloader_ql, &auth_ql, &profiles_ql,
+                    &version_mgr_ql, &texture_mgr_ql, &shader_mgr_ql,
+                    &history_ql, &instance_mgr_ql, &backup_mgr_ql,
+                    &config_mgr_ql, &crash_mgr_ql, &game_ql,
+                ).await?;
+            } else {
+                println!("  {} No launch history found. Play a game first.", style("✗").red());
+            }
+            return Ok(());
+        }
+    }
+
     let base = base_dir();
 
     // ── Auto-update check ────────────────────────────────────────────────────
@@ -189,6 +239,9 @@ async fn main() -> Result<()> {
     let config_mgr = ConfigManager::new(&base);
     let friend_list = FriendList::new(&base);
     let crash_pattern_mgr = CrashPatternManager::new(&base);
+    let config_snapshot_mgr = ConfigSnapshotManager::new(&base);
+    let mod_profile_mgr = ModProfileManager::new(&base.join("instances"));
+    let jvm_preset_mgr = JvmPresetManager::new(&base);
     let mut lang = load_lang(&base);
 
     // Print a startup tip below the banner
@@ -234,8 +287,13 @@ async fn main() -> Result<()> {
             "Settings",                               // 34
             "Language / Idioma / Langue",             // 35
             lang.menu_exit.as_str(),                  // 36
-        ];
-        let choice = Select::with_theme(&theme())
+            "Config Snapshot",                        // 37
+            "Mod Profile Switcher",                   // 38
+            "JVM Flag Presets",                       // 39
+            "Log Tail",                               // 40
+            "Doctor",                                 // 41
+            "Performance Profiler",                   // 42
+        ];        let choice = Select::with_theme(&theme())
             .with_prompt("Main Menu")
             .items(&menu_items)
             .default(0)
@@ -294,6 +352,12 @@ async fn main() -> Result<()> {
                 println!("  {}", lang.goodbye);
                 break;
             }
+            37 => config_snapshot_menu(&config_snapshot_mgr, &instance_mgr, &base).await?,
+            38 => mod_profile_switcher_menu(&mod_profile_mgr, &instance_mgr).await?,
+            39 => jvm_presets_menu(&jvm_preset_mgr).await?,
+            40 => log_tail_menu(&instance_mgr, &game).await?,
+            41 => doctor_menu(&base, &game, &http, &auth, &version_mgr).await?,
+            42 => performance_profiler_menu(&history_mgr).await?,
             _ => {}
         }
         println!();
@@ -3840,5 +3904,507 @@ async fn screenshot_gallery(
             _ => {}
         }
     }
+    Ok(())
+}
+
+// ── Config Snapshot ──────────────────────────────────────────────────────────
+
+async fn config_snapshot_menu(
+    snap_mgr: &ConfigSnapshotManager,
+    instance_mgr: &InstanceManager,
+    base: &PathBuf,
+) -> Result<()> {
+    let instances = instance_mgr.load_all().await?;
+
+    // Pick an instance (or default game config).
+    let instance_name: String = if instances.is_empty() {
+        "default".to_string()
+    } else {
+        let mut labels: Vec<String> = vec!["Default game dir".into()];
+        labels.extend(instances.iter().map(|i| format!("{} [{}]", i.name, i.version_id)));
+        let i = Select::with_theme(&theme())
+            .with_prompt("Config snapshot for")
+            .items(&labels)
+            .default(0)
+            .interact()?;
+        if i == 0 {
+            "default".to_string()
+        } else {
+            instances[i - 1].name.clone()
+        }
+    };
+
+    // Resolve the config/ directory we're snapshotting.
+    let config_dir = if instance_name == "default" {
+        base.join("config")
+    } else {
+        instance_mgr.instance_dir(&instance_name).join("config")
+    };
+
+    loop {
+        let snapshots = snap_mgr.list(&instance_name).await;
+
+        println!();
+        println!(
+            "  {} Config Snapshots — {} ({} saved)",
+            style("◆").cyan(),
+            style(&instance_name).cyan().bold(),
+            snapshots.len()
+        );
+        for s in &snapshots {
+            let date = s.created_at.get(..16).unwrap_or(&s.created_at);
+            println!("  • {} — {}", style(&s.name).cyan(), style(date).dim());
+        }
+        println!();
+
+        let choice = Select::with_theme(&theme())
+            .with_prompt("Config Snapshot")
+            .items(&["Save snapshot", "Restore snapshot", "Delete snapshot", "Back"])
+            .default(0)
+            .interact()?;
+
+        match choice {
+            0 => {
+                let label: String = Input::with_theme(&theme())
+                    .with_prompt("Snapshot name")
+                    .validate_with(|s: &String| {
+                        if s.trim().is_empty() { Err("Name cannot be empty.") } else { Ok(()) }
+                    })
+                    .interact_text()?;
+                match snap_mgr.create(&instance_name, &config_dir, label.trim()).await {
+                    Ok(s) => println!("  {} Snapshot '{}' saved.", style("✓").green(), s.name),
+                    Err(e) => println!("  {} {}", style("✗").red(), e),
+                }
+            }
+            1 => {
+                if snapshots.is_empty() {
+                    println!("  No snapshots to restore.");
+                    continue;
+                }
+                let labels: Vec<String> = snapshots.iter()
+                    .map(|s| format!("{} ({})", s.name, s.created_at.get(..16).unwrap_or("")))
+                    .collect();
+                let i = Select::with_theme(&theme())
+                    .with_prompt("Restore snapshot")
+                    .items(&labels)
+                    .default(0)
+                    .interact()?;
+                let confirm = Confirm::with_theme(&theme())
+                    .with_prompt(format!(
+                        "Restore '{}' into {}? This will overwrite the current config/ directory.",
+                        snapshots[i].name, instance_name
+                    ))
+                    .default(false)
+                    .interact()?;
+                if confirm {
+                    match snap_mgr.restore(&instance_name, &snapshots[i].name, &config_dir).await {
+                        Ok(_) => println!("  {} Restored.", style("✓").green()),
+                        Err(e) => println!("  {} {}", style("✗").red(), e),
+                    }
+                }
+            }
+            2 => {
+                if snapshots.is_empty() {
+                    println!("  No snapshots to delete.");
+                    continue;
+                }
+                let labels: Vec<&str> = snapshots.iter().map(|s| s.name.as_str()).collect();
+                let i = Select::with_theme(&theme())
+                    .with_prompt("Delete snapshot")
+                    .items(&labels)
+                    .default(0)
+                    .interact()?;
+                let confirm = Confirm::with_theme(&theme())
+                    .with_prompt(format!("Delete snapshot '{}'?", snapshots[i].name))
+                    .default(false)
+                    .interact()?;
+                if confirm {
+                    match snap_mgr.delete(&instance_name, &snapshots[i].name).await {
+                        Ok(_) => println!("  {} Deleted.", style("✓").green()),
+                        Err(e) => println!("  {} {}", style("✗").red(), e),
+                    }
+                }
+            }
+            _ => break,
+        }
+    }
+    Ok(())
+}
+
+// ── Mod Profile Switcher ──────────────────────────────────────────────────────
+
+async fn mod_profile_switcher_menu(
+    mp_mgr: &ModProfileManager,
+    instance_mgr: &InstanceManager,
+) -> Result<()> {
+    let instances = instance_mgr.load_all().await?;
+    if instances.is_empty() {
+        println!("  No instances found. Create an instance first.");
+        return Ok(());
+    }
+
+    let inst_labels: Vec<String> = instances.iter()
+        .map(|i| format!("{} [{}]", i.name, i.version_id))
+        .collect();
+    let i_idx = Select::with_theme(&theme())
+        .with_prompt("Select instance")
+        .items(&inst_labels)
+        .default(0)
+        .interact()?;
+    let instance_name = &instances[i_idx].name;
+
+    loop {
+        let profiles = mp_mgr.load_all(instance_name).await;
+
+        println!();
+        println!(
+            "  {} Mod Profiles — {} ({} saved)",
+            style("◆").cyan(),
+            style(instance_name).cyan().bold(),
+            profiles.len()
+        );
+        for p in &profiles {
+            let date = p.updated_at.get(..16).unwrap_or(&p.updated_at);
+            println!(
+                "  • {}  {} mod(s) disabled  {}",
+                style(&p.name).cyan(),
+                p.disabled.len(),
+                style(date).dim()
+            );
+        }
+        println!();
+
+        let choice = Select::with_theme(&theme())
+            .with_prompt("Mod Profile Switcher")
+            .items(&[
+                "Save current state as profile",
+                "Apply profile",
+                "Show profile diff",
+                "Delete profile",
+                "Back",
+            ])
+            .default(0)
+            .interact()?;
+
+        match choice {
+            0 => {
+                let name: String = Input::with_theme(&theme())
+                    .with_prompt("Profile name (e.g. speedrun, casual)")
+                    .validate_with(|s: &String| {
+                        if s.trim().is_empty() { Err("Name cannot be empty.") } else { Ok(()) }
+                    })
+                    .interact_text()?;
+                match mp_mgr.save_current(instance_name, name.trim()).await {
+                    Ok(p) => println!(
+                        "  {} Saved '{}' ({} disabled).",
+                        style("✓").green(), p.name, p.disabled.len()
+                    ),
+                    Err(e) => println!("  {} {}", style("✗").red(), e),
+                }
+            }
+            1 => {
+                if profiles.is_empty() {
+                    println!("  No profiles saved yet.");
+                    continue;
+                }
+                let labels: Vec<&str> = profiles.iter().map(|p| p.name.as_str()).collect();
+                let pi = Select::with_theme(&theme())
+                    .with_prompt("Apply profile")
+                    .items(&labels)
+                    .default(0)
+                    .interact()?;
+                let confirm = Confirm::with_theme(&theme())
+                    .with_prompt(format!(
+                        "Apply '{}' to {}? This will rename mod files on disk.",
+                        profiles[pi].name, instance_name
+                    ))
+                    .default(true)
+                    .interact()?;
+                if confirm {
+                    match mp_mgr.apply(instance_name, &profiles[pi].name).await {
+                        Ok(_) => println!("  {} Profile applied.", style("✓").green()),
+                        Err(e) => println!("  {} {}", style("✗").red(), e),
+                    }
+                }
+            }
+            2 => {
+                if profiles.len() < 2 {
+                    println!("  Need at least 2 profiles to diff.");
+                    continue;
+                }
+                let labels: Vec<&str> = profiles.iter().map(|p| p.name.as_str()).collect();
+                let a = Select::with_theme(&theme()).with_prompt("Profile A").items(&labels).default(0).interact()?;
+                let b = Select::with_theme(&theme()).with_prompt("Profile B").items(&labels).default(1).interact()?;
+                match mp_mgr.diff(instance_name, &profiles[a].name, &profiles[b].name).await {
+                    Ok(diffs) if diffs.is_empty() => println!("  Profiles are identical."),
+                    Ok(diffs) => {
+                        println!();
+                        for d in &diffs { println!("{}", d); }
+                    }
+                    Err(e) => println!("  {} {}", style("✗").red(), e),
+                }
+            }
+            3 => {
+                if profiles.is_empty() {
+                    println!("  No profiles to delete.");
+                    continue;
+                }
+                let labels: Vec<&str> = profiles.iter().map(|p| p.name.as_str()).collect();
+                let pi = Select::with_theme(&theme()).with_prompt("Delete profile").items(&labels).default(0).interact()?;
+                let confirm = Confirm::with_theme(&theme())
+                    .with_prompt(format!("Delete profile '{}'?", profiles[pi].name))
+                    .default(false)
+                    .interact()?;
+                if confirm {
+                    match mp_mgr.delete(instance_name, &profiles[pi].name).await {
+                        Ok(_) => println!("  {} Deleted.", style("✓").green()),
+                        Err(e) => println!("  {} {}", style("✗").red(), e),
+                    }
+                }
+            }
+            _ => break,
+        }
+    }
+    Ok(())
+}
+
+// ── JVM Flag Presets ──────────────────────────────────────────────────────────
+
+async fn jvm_presets_menu(preset_mgr: &JvmPresetManager) -> Result<()> {
+    loop {
+        let presets = preset_mgr.load_all().await;
+
+        println!();
+        println!("  {} JVM Flag Presets ({})", style("◆").cyan(), presets.len());
+        for p in &presets {
+            println!(
+                "  • {}  {}  — {}",
+                style(&p.name).cyan(),
+                style(p.flags.join(" ")).dim(),
+                p.description
+            );
+        }
+        println!();
+        println!("  {} Presets are appended to the JVM arg list at launch (per-instance).", style("ℹ").dim());
+        println!();
+
+        let choice = Select::with_theme(&theme())
+            .with_prompt("JVM Flag Presets")
+            .items(&["Create preset", "Edit preset", "Delete preset", "Back"])
+            .default(0)
+            .interact()?;
+
+        match choice {
+            0 => {
+                let name: String = Input::with_theme(&theme())
+                    .with_prompt("Preset name")
+                    .validate_with(|s: &String| {
+                        if s.trim().is_empty() { Err("Name cannot be empty.") } else { Ok(()) }
+                    })
+                    .interact_text()?;
+                let flags_raw: String = Input::with_theme(&theme())
+                    .with_prompt("JVM flags (space-separated)")
+                    .validate_with(|s: &String| {
+                        if s.trim().is_empty() { Err("At least one flag required.") } else { Ok(()) }
+                    })
+                    .interact_text()?;
+                let flags: Vec<String> = flags_raw.split_whitespace().map(|s| s.to_string()).collect();
+                let desc: String = Input::with_theme(&theme())
+                    .with_prompt("Description (optional)")
+                    .allow_empty(true)
+                    .interact_text()?;
+                match preset_mgr.create(name.trim(), flags, desc.trim()).await {
+                    Ok(p) => println!("  {} Created '{}' ({} flag(s)).", style("✓").green(), p.name, p.flags.len()),
+                    Err(e) => println!("  {} {}", style("✗").red(), e),
+                }
+            }
+            1 => {
+                if presets.is_empty() {
+                    println!("  No presets to edit.");
+                    continue;
+                }
+                let labels: Vec<&str> = presets.iter().map(|p| p.name.as_str()).collect();
+                let pi = Select::with_theme(&theme()).with_prompt("Edit preset").items(&labels).default(0).interact()?;
+                let flags_raw: String = Input::with_theme(&theme())
+                    .with_prompt("New flags (space-separated)")
+                    .with_initial_text(&presets[pi].flags.join(" "))
+                    .interact_text()?;
+                let new_flags: Vec<String> = flags_raw.split_whitespace().map(|s| s.to_string()).collect();
+                let desc: String = Input::with_theme(&theme())
+                    .with_prompt("Description")
+                    .with_initial_text(&presets[pi].description)
+                    .allow_empty(true)
+                    .interact_text()?;
+                match preset_mgr.update(&presets[pi].name, Some(new_flags), Some(desc.trim())).await {
+                    Ok(_) => println!("  {} Updated.", style("✓").green()),
+                    Err(e) => println!("  {} {}", style("✗").red(), e),
+                }
+            }
+            2 => {
+                if presets.is_empty() {
+                    println!("  No presets to delete.");
+                    continue;
+                }
+                let labels: Vec<&str> = presets.iter().map(|p| p.name.as_str()).collect();
+                let pi = Select::with_theme(&theme()).with_prompt("Delete preset").items(&labels).default(0).interact()?;
+                let confirm = Confirm::with_theme(&theme())
+                    .with_prompt(format!("Delete preset '{}'?", presets[pi].name))
+                    .default(false)
+                    .interact()?;
+                if confirm {
+                    match preset_mgr.delete(&presets[pi].name).await {
+                        Ok(_) => println!("  {} Deleted.", style("✓").green()),
+                        Err(e) => println!("  {} {}", style("✗").red(), e),
+                    }
+                }
+            }
+            _ => break,
+        }
+    }
+    Ok(())
+}
+
+// ── Log Tail ──────────────────────────────────────────────────────────────────
+
+async fn log_tail_menu(
+    instance_mgr: &InstanceManager,
+    game_dir: &PathBuf,
+) -> Result<()> {
+    let instances = instance_mgr.load_all().await?;
+
+    let target_dir = if instances.is_empty() {
+        game_dir.clone()
+    } else {
+        let mut labels: Vec<String> = vec!["Default game dir".into()];
+        labels.extend(instances.iter().map(|i| format!("{} [{}]", i.name, i.version_id)));
+        let i = Select::with_theme(&theme())
+            .with_prompt("Tail logs from")
+            .items(&labels)
+            .default(0)
+            .interact()?;
+        if i == 0 {
+            game_dir.clone()
+        } else {
+            instance_mgr.instance_dir(&instances[i - 1].name)
+        }
+    };
+
+    let idle_choices = ["10s (default)", "30s", "60s", "5 minutes"];
+    let idle_idx = Select::with_theme(&theme())
+        .with_prompt("Stop after idle for")
+        .items(&idle_choices)
+        .default(0)
+        .interact()?;
+    let idle_secs = match idle_idx {
+        1 => 30,
+        2 => 60,
+        3 => 300,
+        _ => 10,
+    };
+
+    logtail::tail(&target_dir, std::time::Duration::from_secs(idle_secs))?;
+    Ok(())
+}
+
+// ── Doctor ────────────────────────────────────────────────────────────────────
+
+async fn doctor_menu(
+    base: &PathBuf,
+    game_dir: &PathBuf,
+    http: &reqwest::Client,
+    auth: &Authenticator,
+    version_mgr: &VersionManager,
+) -> Result<()> {
+    println!();
+    let _ = doctor::run(base, game_dir, http, auth, version_mgr).await?;
+    Ok(())
+}
+
+// ── Performance Profiler ──────────────────────────────────────────────────────
+
+async fn performance_profiler_menu(history_mgr: &HistoryManager) -> Result<()> {
+    let records = history_mgr.load().await?;
+
+    // Only sessions that have at least FPS or heap data.
+    let profiled: Vec<_> = records.iter()
+        .rev()
+        .filter(|r| r.fps_avg.is_some() || r.peak_heap_mb.is_some())
+        .collect();
+
+    println!();
+    println!("  {} Performance Profiler", style("◆").cyan().bold());
+    println!("  Shows sessions with benchmark data (enable Benchmark Mode in Settings).");
+    println!();
+
+    if profiled.is_empty() {
+        println!("  No performance data recorded yet.");
+        println!("  Enable {} in Settings, then play a session.", style("Benchmark Mode").cyan());
+        return Ok(());
+    }
+
+    // ── Summary table ─────────────────────────────────────────────────────────
+    println!(
+        "  {:<24} {:<12} {:>8} {:>8} {:>8} {:>10}",
+        style("Version").bold(),
+        style("Date").bold(),
+        style("FPS avg").bold(),
+        style("FPS min").bold(),
+        style("FPS max").bold(),
+        style("Peak heap").bold(),
+    );
+    println!("  {}", style("─".repeat(76)).dim());
+
+    for r in &profiled {
+        let date = r.started_at.format("%Y-%m-%d %H:%M").to_string();
+        let fps_avg = r.fps_avg.map(|v| v.to_string()).unwrap_or_else(|| "—".into());
+        let fps_min = r.fps_min.map(|v| v.to_string()).unwrap_or_else(|| "—".into());
+        let fps_max = r.fps_max.map(|v| v.to_string()).unwrap_or_else(|| "—".into());
+        let heap   = r.peak_heap_mb.map(|v| format!("{} MB", v)).unwrap_or_else(|| "—".into());
+        println!(
+            "  {:<24} {:<12} {:>8} {:>8} {:>8} {:>10}",
+            style(&r.version_id).cyan(),
+            style(&date).dim(),
+            style(&fps_avg).green(),
+            style(&fps_min).yellow(),
+            style(&fps_max).green(),
+            style(&heap).yellow(),
+        );
+    }
+
+    println!();
+
+    // ── Aggregated stats across all profiled sessions ─────────────────────────
+    let fps_avgs: Vec<u32> = profiled.iter().filter_map(|r| r.fps_avg).collect();
+    let heaps:    Vec<u64> = profiled.iter().filter_map(|r| r.peak_heap_mb).collect();
+
+    if !fps_avgs.is_empty() {
+        let overall_avg = fps_avgs.iter().sum::<u32>() / fps_avgs.len() as u32;
+        let overall_min = fps_avgs.iter().copied().min().unwrap_or(0);
+        let overall_max = fps_avgs.iter().copied().max().unwrap_or(0);
+        println!(
+            "  {} All-session FPS  avg: {}  min: {}  max: {}",
+            style("◆").cyan(),
+            style(overall_avg).green().bold(),
+            style(overall_min).yellow(),
+            style(overall_max).green(),
+        );
+    }
+    if !heaps.is_empty() {
+        let peak = heaps.iter().copied().max().unwrap_or(0);
+        let avg  = heaps.iter().sum::<u64>() / heaps.len() as u64;
+        println!(
+            "  {} Heap — avg peak: {} MB  all-time peak: {} MB",
+            style("◆").cyan(),
+            style(avg).yellow(),
+            style(peak).red(),
+        );
+    }
+
+    println!();
+    println!(
+        "  {} {} session(s) with performance data shown.",
+        style("ℹ").dim(), profiled.len()
+    );
+
     Ok(())
 }

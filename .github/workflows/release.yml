@@ -626,3 +626,57 @@ jobs:
           files: release-assets/SHA256SUMS.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+
+  # ---------------------------------------------------------------------
+  # SBOM — generates a CycloneDX Software Bill of Materials from
+  # Cargo.lock and attaches it to the release.  Consumers can use the
+  # SBOM to audit dependency licenses and check for known CVEs.
+  # ---------------------------------------------------------------------
+  sbom:
+    needs:
+      - build-windows-x64
+      - build-windows-arm64
+      - build-linux-x64
+      - build-linux-arm64
+      - build-linux-flatpak
+      - build-macos-intel
+      - build-macos-arm
+      - build-macos-universal
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-sbom-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-sbom-
+
+      - name: Install cargo-cyclonedx
+        run: cargo install cargo-cyclonedx --locked
+
+      - name: Generate SBOM
+        run: |
+          cargo cyclonedx \
+            --format json \
+            --spec-version 1.5 \
+            --all \
+            --output-prefix sumerian-sbom
+          # cargo-cyclonedx writes <prefix>_<package>.cdx.json; rename for clarity
+          mv sumerian-sbom_sumerian-client.cdx.json sumerian-sbom.cdx.json 2>/dev/null || \
+            mv sumerian-sbom*.cdx.json sumerian-sbom.cdx.json
+
+      - name: Upload SBOM
+        uses: softprops/action-gh-release@v2
+        with:
+          files: sumerian-sbom.cdx.json
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
