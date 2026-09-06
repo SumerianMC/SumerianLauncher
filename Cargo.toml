@@ -33,4 +33,4 @@ uuid = { version = "1", features = ["v3", "v4"] }
 base64 = "0.21"
 url = "2"
 discord-rich-presence = "1.1.0"
-sysinfo = "0.30"
+sysinfo = "0.39"
