@@ -33,6 +33,12 @@ pub struct LauncherConfig {
     /// When true, FPS and heap statistics are sampled from logs during each session.
     #[serde(default)]
     pub benchmark_mode: bool,
+    /// Optional wrapper binary prepended to Java invocation (e.g. "mangohud").
+    #[serde(default)]
+    pub launch_wrapper: Option<String>,
+    /// Automatically back up saves every N hours of cumulative playtime (0 = disabled).
+    #[serde(default)]
+    pub scheduled_backup_hours: u64,
 }
 
 impl Default for LauncherConfig {
@@ -50,6 +56,8 @@ impl Default for LauncherConfig {
             discord_rpc: true,
             webhook_url: None,
             benchmark_mode: false,
+            launch_wrapper: None,
+            scheduled_backup_hours: 0,
         }
     }
 }

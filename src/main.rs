@@ -13,18 +13,21 @@ use client::injection::{GameLauncher, LaunchOptions, detect_java_major, find_jav
 use launcher::{
     advancements,
     auth::{AuthSession, AuthType, Authenticator, ProfileManager},
-    backup::BackupManager,
+    backup::{BackupManager, ScheduledBackupManager},
     benchmark,
+    changelogviewer,
     config::ConfigManager,
     configexport,
     configsnapshot::ConfigSnapshotManager,
     conflicts,
     crashpatterns::CrashPatternManager,
+    depgraph,
     doctor,
     downloader::Downloader,
     friends::{Friend, FriendList},
     history::{HistoryManager, LaunchRecord},
     instancediff,
+    instancehealth,
     instances::{InstanceManager, InstanceProfile, WorldManager},
     jvmadvisor,
     jvmpresets::JvmPresetManager,
@@ -37,13 +40,18 @@ use launcher::{
     modpacks::ModpackInstaller,
     modprofiles::ModProfileManager,
     mods::ModManager,
+    modsearchhistory::ModSearchHistoryManager,
     news,
+    playtime,
+    playtimegoals::PlaytimeGoalManager,
     portforward,
     presets::{LaunchPreset, PresetManager},
     realms,
     recording,
     screenshots::ScreenshotGallery,
+    seedreader,
     servers::ServerBrowser,
+    sessiontimer,
     skins::SkinManager,
     splashscreen,
     servermanager,
@@ -163,7 +171,10 @@ async fn main() -> Result<()> {
                     &http_ql, &downloader_ql, &auth_ql, &profiles_ql,
                     &version_mgr_ql, &texture_mgr_ql, &shader_mgr_ql,
                     &history_ql, &instance_mgr_ql, &backup_mgr_ql,
-                    &config_mgr_ql, &crash_mgr_ql, &game_ql,
+                    &config_mgr_ql, &crash_mgr_ql,
+                    &ScheduledBackupManager::new(&base_ql),
+                    &PlaytimeGoalManager::new(&base_ql),
+                    &game_ql,
                 ).await?;
             } else {
                 println!("  {} No launch history found. Play a game first.", style("✗").red());
@@ -242,6 +253,9 @@ async fn main() -> Result<()> {
     let config_snapshot_mgr = ConfigSnapshotManager::new(&base);
     let mod_profile_mgr = ModProfileManager::new(&base.join("instances"));
     let jvm_preset_mgr = JvmPresetManager::new(&base);
+    let playtime_goal_mgr = PlaytimeGoalManager::new(&base);
+    let scheduled_backup_mgr = ScheduledBackupManager::new(&base);
+    let search_history_mgr = ModSearchHistoryManager::new(&base);
     let mut lang = load_lang(&base);
 
     // Print a startup tip below the banner
@@ -293,6 +307,14 @@ async fn main() -> Result<()> {
             "Log Tail",                               // 40
             "Doctor",                                 // 41
             "Performance Profiler",                   // 42
+            "Playtime Goals",                         // 43
+            "World Seed Reader",                      // 44
+            "Instance Health Check",                  // 45
+            "Resource Pack Preview",                  // 46
+            "Mod Search History",                     // 47
+            "Bulk Mod Toggle",                        // 48
+            "Changelog Viewer",                       // 49
+            "Mod Dependency Graph",                   // 50
         ];        let choice = Select::with_theme(&theme())
             .with_prompt("Main Menu")
             .items(&menu_items)
@@ -302,7 +324,7 @@ async fn main() -> Result<()> {
         match choice {
             0  => install_version(&http, &downloader, &version_mgr, &game).await?,
             1  => install_mod_loader(&http, &version_mgr, &game).await?,
-            2  => launch_game(&http, &downloader, &auth, &profiles, &version_mgr, &texture_mgr, &shader_mgr, &history_mgr, &instance_mgr, &backup_mgr, &config_mgr, &crash_pattern_mgr, &game).await?,
+            2  => launch_game(&http, &downloader, &auth, &profiles, &version_mgr, &texture_mgr, &shader_mgr, &history_mgr, &instance_mgr, &backup_mgr, &config_mgr, &crash_pattern_mgr, &scheduled_backup_mgr, &playtime_goal_mgr, &game).await?,
             3  => launch_preset(&http, &downloader, &auth, &profiles, &preset_mgr, &version_mgr, &texture_mgr, &shader_mgr, &history_mgr, &instance_mgr, &backup_mgr, &config_mgr, &crash_pattern_mgr, &game).await?,
             4  => manage_presets(&preset_mgr, &version_mgr, &texture_mgr, &shader_mgr).await?,
             5  => manage_accounts(&auth, &profiles, &base).await?,
@@ -358,6 +380,14 @@ async fn main() -> Result<()> {
             40 => log_tail_menu(&instance_mgr, &game).await?,
             41 => doctor_menu(&base, &game, &http, &auth, &version_mgr).await?,
             42 => performance_profiler_menu(&history_mgr).await?,
+            43 => playtime_goals_menu(&playtime_goal_mgr, &history_mgr).await?,
+            44 => world_seed_reader_menu(&instance_mgr, &game).await?,
+            45 => instance_health_check_menu(&instance_mgr, &game).await?,
+            46 => resource_pack_preview_menu(&texture_mgr).await?,
+            47 => mod_search_history_menu(&search_history_mgr, &instance_mgr).await?,
+            48 => bulk_mod_toggle_menu(&instance_mgr).await?,
+            49 => changelog_viewer_menu(&http, &version_mgr).await?,
+            50 => dep_graph_menu(&http, &instance_mgr, &version_mgr, &game).await?,
             _ => {}
         }
         println!();
@@ -447,6 +477,8 @@ async fn launch_game(
     backup_mgr: &BackupManager,
     config_mgr: &ConfigManager,
     crash_pattern_mgr: &CrashPatternManager,
+    scheduled_backup_mgr: &ScheduledBackupManager,
+    playtime_goal_mgr: &PlaytimeGoalManager,
     game_dir: &PathBuf,
 ) -> Result<()> {
     // List installed versions
@@ -662,6 +694,7 @@ async fn launch_game(
         server: None,
         port: None,
         game_dir_override: game_dir_override.clone(),
+        launch_wrapper: cfg.launch_wrapper.as_deref(),
     };
     let mut child = launcher.launch(&meta, &opts, version_mgr)?;
     let mut discord = DiscordPresence::new();
@@ -669,7 +702,10 @@ async fn launch_game(
     discord.set_playing(&meta.id, &session.username);
     let started_at = chrono::Utc::now();
     let start = std::time::Instant::now();
+    // Start in-place session timer overlay on stderr.
+    let timer_handle = sessiontimer::start(std::time::Duration::from_secs(60));
     let status = child.wait()?;
+    timer_handle.stop();
     discord.clear();
     let duration_secs = start.elapsed().as_secs();
     let exit_code = status.code();
@@ -725,6 +761,27 @@ async fn launch_game(
         fps_max: bench_stats.as_ref().and_then(|s| s.fps_max()),
         peak_heap_mb: bench_stats.as_ref().and_then(|s| s.peak_heap_mb()),
     }).await.ok();
+
+    // Scheduled auto-backup tick.
+    if cfg.scheduled_backup_hours > 0 {
+        let backup_dir = game_dir_override.as_ref().unwrap_or(game_dir);
+        let inst_label = game_dir_override.as_ref()
+            .and_then(|d| d.file_name())
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "default".to_string());
+        match scheduled_backup_mgr.tick(&inst_label, backup_dir, duration_secs, cfg.scheduled_backup_hours).await {
+            Ok(Some(path)) => println!(
+                "  {} Scheduled backup created: {}",
+                style("✓").green(),
+                path.file_name().unwrap_or_default().to_string_lossy()
+            ),
+            Ok(None) => {}
+            Err(e) => println!("  {} Scheduled backup failed: {}", style("⚠").yellow(), e),
+        }
+    }
+
+    // Playtime goal check.
+    playtime_goal_mgr.check_after_session(history_mgr).await;
 
     println!("  Game exited with status: {}", status);
     if exit_code != Some(0) {
@@ -1241,6 +1298,7 @@ async fn launch_preset(
         server: preset.server.as_deref(),
         port: preset.port,
         game_dir_override: game_dir_override.clone(),
+        launch_wrapper: cfg.launch_wrapper.as_deref(),
     };
     let mut child = launcher.launch(&meta, &opts, version_mgr)?;
 
@@ -2745,6 +2803,8 @@ async fn settings_menu(config_mgr: &ConfigManager) -> Result<()> {
         println!("  Check updates        : {}", if cfg.check_updates_on_start { style("on").green() } else { style("off").dim() });
         println!("  Benchmark mode       : {}", if cfg.benchmark_mode { style("on").green() } else { style("off").dim() });
         println!("  Webhook URL          : {}", cfg.webhook_url.as_deref().unwrap_or("(not set)"));
+        println!("  Launch wrapper       : {}", cfg.launch_wrapper.as_deref().unwrap_or("(none)"));
+        println!("  Scheduled backup     : {}", if cfg.scheduled_backup_hours == 0 { "off".into() } else { format!("every {}h of playtime", cfg.scheduled_backup_hours) });
         println!("  Default resolution   : {}",
             match (cfg.default_width, cfg.default_height) {
                 (Some(w), Some(h)) => format!("{}x{}", w, h),
@@ -2765,6 +2825,8 @@ async fn settings_menu(config_mgr: &ConfigManager) -> Result<()> {
                 "Toggle update check on start",
                 "Toggle benchmark mode (FPS + heap sampling)",
                 "Set webhook URL",
+                "Set launch wrapper (mangohud, gamescope, etc.)",
+                "Set scheduled backup interval",
                 "Set default resolution",
                 "Set Java 8 path",
                 "Set Java 21 path",
@@ -2803,6 +2865,22 @@ async fn settings_menu(config_mgr: &ConfigManager) -> Result<()> {
                 cfg.webhook_url = if url.trim().is_empty() { None } else { Some(url.trim().to_string()) };
             }
             6 => {
+                let w: String = Input::with_theme(&theme())
+                    .with_prompt("Launch wrapper binary (e.g. mangohud, gamescope; blank to disable)")
+                    .with_initial_text(cfg.launch_wrapper.as_deref().unwrap_or(""))
+                    .allow_empty(true)
+                    .interact_text()?;
+                cfg.launch_wrapper = if w.trim().is_empty() { None } else { Some(w.trim().to_string()) };
+            }
+            7 => {
+                let h: String = Input::with_theme(&theme())
+                    .with_prompt("Backup every N hours of playtime (0 = off)")
+                    .with_initial_text(&cfg.scheduled_backup_hours.to_string())
+                    .validate_with(|s: &String| s.trim().parse::<u64>().map(|_| ()).map_err(|_| "Must be a number"))
+                    .interact_text()?;
+                cfg.scheduled_backup_hours = h.trim().parse().unwrap_or(0);
+            }
+            8 => {
                 let use_res = Confirm::with_theme(&theme()).with_prompt("Set custom resolution?").default(cfg.default_width.is_some()).interact()?;
                 if use_res {
                     let w: String = Input::with_theme(&theme()).with_prompt("Width")
@@ -2820,19 +2898,19 @@ async fn settings_menu(config_mgr: &ConfigManager) -> Result<()> {
                     cfg.default_height = None;
                 }
             }
-            7 => {
+            9 => {
                 let p: String = Input::with_theme(&theme()).with_prompt("Java 8 binary path (blank = auto)").allow_empty(true)
                     .with_initial_text(cfg.java8_path.as_deref().unwrap_or("")).interact_text()?;
                 cfg.java8_path = if p.trim().is_empty() { None } else { Some(p.trim().to_string()) };
                 if let Some(ref path) = cfg.java8_path { std::env::set_var("JAVA8_HOME", std::path::Path::new(path).parent().and_then(|p| p.parent()).unwrap_or(std::path::Path::new(path))); }
             }
-            8 => {
+            10 => {
                 let p: String = Input::with_theme(&theme()).with_prompt("Java 21 binary path (blank = auto)").allow_empty(true)
                     .with_initial_text(cfg.java21_path.as_deref().unwrap_or("")).interact_text()?;
                 cfg.java21_path = if p.trim().is_empty() { None } else { Some(p.trim().to_string()) };
                 if let Some(ref path) = cfg.java21_path { std::env::set_var("JAVA21_HOME", std::path::Path::new(path).parent().and_then(|p| p.parent()).unwrap_or(std::path::Path::new(path))); }
             }
-            9 => {
+            11 => {
                 let p: String = Input::with_theme(&theme()).with_prompt("Java 25 binary path (blank = auto)").allow_empty(true)
                     .with_initial_text(cfg.java25_path.as_deref().unwrap_or("")).interact_text()?;
                 cfg.java25_path = if p.trim().is_empty() { None } else { Some(p.trim().to_string()) };
@@ -4406,5 +4484,464 @@ async fn performance_profiler_menu(history_mgr: &HistoryManager) -> Result<()> {
         style("ℹ").dim(), profiled.len()
     );
 
+    Ok(())
+}
+
+// ── Playtime Goals ────────────────────────────────────────────────────────────
+
+async fn playtime_goals_menu(
+    goal_mgr: &PlaytimeGoalManager,
+    history_mgr: &HistoryManager,
+) -> Result<()> {
+    loop {
+        let goals = goal_mgr.load().await;
+        println!();
+        goal_mgr.print_progress(history_mgr).await?;
+
+        let choice = Select::with_theme(&theme())
+            .with_prompt("Playtime Goals")
+            .items(&["Set daily goal", "Set weekly goal", "Clear all goals", "Back"])
+            .default(0)
+            .interact()?;
+
+        match choice {
+            0 => {
+                let raw: String = Input::with_theme(&theme())
+                    .with_prompt("Daily goal (e.g. 1h30m, 90m, or 0 to disable)")
+                    .with_initial_text(&fmt_goal_duration(goals.daily_secs))
+                    .interact_text()?;
+                let secs = parse_goal_duration(raw.trim());
+                let mut g = goal_mgr.load().await;
+                g.daily_secs = secs;
+                match goal_mgr.save(&g).await {
+                    Ok(_) => println!("  {} Daily goal set to {}.", style("✓").green(), fmt_goal_duration(secs)),
+                    Err(e) => println!("  {} {}", style("✗").red(), e),
+                }
+            }
+            1 => {
+                let raw: String = Input::with_theme(&theme())
+                    .with_prompt("Weekly goal (e.g. 10h, 600m, or 0 to disable)")
+                    .with_initial_text(&fmt_goal_duration(goals.weekly_secs))
+                    .interact_text()?;
+                let secs = parse_goal_duration(raw.trim());
+                let mut g = goal_mgr.load().await;
+                g.weekly_secs = secs;
+                match goal_mgr.save(&g).await {
+                    Ok(_) => println!("  {} Weekly goal set to {}.", style("✓").green(), fmt_goal_duration(secs)),
+                    Err(e) => println!("  {} {}", style("✗").red(), e),
+                }
+            }
+            2 => {
+                let mut g = goal_mgr.load().await;
+                g.daily_secs = 0;
+                g.weekly_secs = 0;
+                goal_mgr.save(&g).await.ok();
+                println!("  {} Goals cleared.", style("✓").green());
+            }
+            _ => break,
+        }
+    }
+    Ok(())
+}
+
+fn fmt_goal_duration(secs: u64) -> String {
+    if secs == 0 { return "0".into(); }
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
+    if h > 0 && m > 0 { format!("{}h{}m", h, m) }
+    else if h > 0 { format!("{}h", h) }
+    else { format!("{}m", m) }
+}
+
+fn parse_goal_duration(s: &str) -> u64 {
+    // Accept: "0", "90m", "1h30m", "1h", "5400" (bare seconds)
+    if s == "0" { return 0; }
+    let lower = s.to_lowercase();
+    let mut total = 0u64;
+    let mut num = String::new();
+    for c in lower.chars() {
+        if c.is_ascii_digit() {
+            num.push(c);
+        } else if c == 'h' {
+            total += num.trim().parse::<u64>().unwrap_or(0) * 3600;
+            num.clear();
+        } else if c == 'm' {
+            total += num.trim().parse::<u64>().unwrap_or(0) * 60;
+            num.clear();
+        }
+    }
+    // Bare number treated as minutes
+    if !num.trim().is_empty() {
+        total += num.trim().parse::<u64>().unwrap_or(0) * 60;
+    }
+    total
+}
+
+// ── World Seed Reader ─────────────────────────────────────────────────────────
+
+async fn world_seed_reader_menu(
+    instance_mgr: &InstanceManager,
+    game_dir: &PathBuf,
+) -> Result<()> {
+    let instances = instance_mgr.load_all().await?;
+
+    let base_saves = if instances.is_empty() {
+        game_dir.join("saves")
+    } else {
+        let mut labels: Vec<String> = vec!["Default game dir".into()];
+        labels.extend(instances.iter().map(|i| format!("{} [{}]", i.name, i.version_id)));
+        let i = Select::with_theme(&theme())
+            .with_prompt("Read seeds from")
+            .items(&labels)
+            .default(0)
+            .interact()?;
+        if i == 0 { game_dir.join("saves") }
+        else { instance_mgr.instance_dir(&instances[i - 1].name).join("saves") }
+    };
+
+    if !base_saves.exists() {
+        println!("  No saves directory found.");
+        return Ok(());
+    }
+
+    let worlds = launcher::instances::WorldManager::list(&base_saves).await?;
+    if worlds.is_empty() {
+        println!("  No worlds found.");
+        return Ok(());
+    }
+
+    let labels: Vec<String> = worlds.iter().map(|w| {
+        let date = w.last_played.as_deref().unwrap_or("unknown");
+        format!("{} — last played: {}", w.name, date)
+    }).collect();
+
+    let i = Select::with_theme(&theme())
+        .with_prompt("Select world")
+        .items(&labels)
+        .default(0)
+        .interact()?;
+
+    match seedreader::read_seed(&worlds[i].path) {
+        Ok(seed) => {
+            println!();
+            println!(
+                "  {} World: {}",
+                style("◆").cyan(),
+                style(&worlds[i].name).cyan().bold()
+            );
+            println!(
+                "  {} Seed:  {}",
+                style("◆").cyan(),
+                style(seedreader::format_seed(seed)).green().bold()
+            );
+            println!();
+            println!("  {} Use /seed in-game to verify.", style("ℹ").dim());
+        }
+        Err(e) => println!("  {} {}", style("✗").red(), e),
+    }
+    Ok(())
+}
+
+// ── Instance Health Check ─────────────────────────────────────────────────────
+
+async fn instance_health_check_menu(
+    instance_mgr: &InstanceManager,
+    game_dir: &PathBuf,
+) -> Result<()> {
+    let instances = instance_mgr.load_all().await?;
+
+    let mods_dir = if instances.is_empty() {
+        game_dir.join("mods")
+    } else {
+        let mut labels: Vec<String> = vec!["Default game dir".into()];
+        labels.extend(instances.iter().map(|i| format!("{} [{}]", i.name, i.version_id)));
+        let i = Select::with_theme(&theme())
+            .with_prompt("Check health for")
+            .items(&labels)
+            .default(0)
+            .interact()?;
+        if i == 0 { game_dir.join("mods") }
+        else { instance_mgr.instance_dir(&instances[i - 1].name).join("mods") }
+    };
+
+    println!();
+    println!("  {} Instance Health Check", style("◆").cyan().bold());
+    println!("  Scanning: {}", style(mods_dir.display().to_string()).dim());
+    println!();
+
+    let issues = instancehealth::check(&mods_dir);
+    if issues.is_empty() {
+        println!("  {} No issues found — all clear!", style("✓").green().bold());
+    } else {
+        println!("  {} {} issue(s) found:", style("⚠").yellow().bold(), issues.len());
+        println!();
+        for issue in &issues {
+            let sev = if issue.severity() == "ERROR" {
+                style(issue.severity()).red().bold()
+            } else {
+                style(issue.severity()).yellow().bold()
+            };
+            println!("  [{}] {}", sev, issue.message());
+        }
+    }
+    Ok(())
+}
+
+// ── Resource Pack Preview ─────────────────────────────────────────────────────
+
+async fn resource_pack_preview_menu(texture_mgr: &TextureManager) -> Result<()> {
+    let packs = texture_mgr.list_packs().await?;
+    if packs.is_empty() {
+        println!("  No resource packs installed.");
+        return Ok(());
+    }
+
+    let labels: Vec<String> = packs.iter().map(|p| p.name.clone()).collect();
+    let i = Select::with_theme(&theme())
+        .with_prompt("Preview pack")
+        .items(&labels)
+        .default(0)
+        .interact()?;
+
+    match texture_mgr.preview_pack(&packs[i].name).await {
+        Ok(preview) => {
+            println!();
+            println!("  {} {}", style("◆").cyan(), style(&packs[i].name).cyan().bold());
+            println!(
+                "  Pack format : {} (MC {})",
+                style(preview.format).green(),
+                preview.format_label()
+            );
+            println!(
+                "  Description : {}",
+                style(preview.clean_description()).italic()
+            );
+        }
+        Err(e) => println!("  {} {}", style("✗").red(), e),
+    }
+    Ok(())
+}
+
+// ── Mod Search History ────────────────────────────────────────────────────────
+
+async fn mod_search_history_menu(
+    history_mgr: &ModSearchHistoryManager,
+    instance_mgr: &InstanceManager,
+) -> Result<()> {
+    let instances = instance_mgr.load_all().await?;
+    let instance_key = if instances.is_empty() {
+        "default".to_string()
+    } else {
+        let mut labels: Vec<String> = vec!["Default".into()];
+        labels.extend(instances.iter().map(|i| i.name.clone()));
+        let i = Select::with_theme(&theme())
+            .with_prompt("History for")
+            .items(&labels)
+            .default(0)
+            .interact()?;
+        if i == 0 { "default".to_string() } else { instances[i - 1].name.clone() }
+    };
+
+    loop {
+        let queries = history_mgr.get(&instance_key).await;
+        println!();
+        println!(
+            "  {} Mod Search History — {} ({} entries)",
+            style("◆").cyan(),
+            style(&instance_key).cyan().bold(),
+            queries.len()
+        );
+        if queries.is_empty() {
+            println!("  No search history yet.");
+        } else {
+            for (i, q) in queries.iter().rev().enumerate() {
+                println!("  {}. {}", i + 1, style(q).cyan());
+            }
+        }
+        println!();
+
+        let choice = Select::with_theme(&theme())
+            .with_prompt("Mod Search History")
+            .items(&["Clear history", "Back"])
+            .default(1)
+            .interact()?;
+
+        match choice {
+            0 => {
+                let confirm = Confirm::with_theme(&theme())
+                    .with_prompt(format!("Clear search history for '{}'?", instance_key))
+                    .default(false)
+                    .interact()?;
+                if confirm {
+                    match history_mgr.clear(&instance_key).await {
+                        Ok(_) => println!("  {} Cleared.", style("✓").green()),
+                        Err(e) => println!("  {} {}", style("✗").red(), e),
+                    }
+                }
+            }
+            _ => break,
+        }
+    }
+    Ok(())
+}
+
+// ── Bulk Mod Toggle ───────────────────────────────────────────────────────────
+
+async fn bulk_mod_toggle_menu(instance_mgr: &InstanceManager) -> Result<()> {
+    let instances = instance_mgr.load_all().await?;
+    if instances.is_empty() {
+        println!("  No instances found.");
+        return Ok(());
+    }
+
+    let labels: Vec<String> = instances.iter()
+        .map(|i| format!("{} [{}]", i.name, i.version_id))
+        .collect();
+    let i = Select::with_theme(&theme())
+        .with_prompt("Select instance")
+        .items(&labels)
+        .default(0)
+        .interact()?;
+    let instance_name = &instances[i].name;
+
+    let choice = Select::with_theme(&theme())
+        .with_prompt(format!("Bulk mod toggle — {}", instance_name))
+        .items(&["Disable ALL mods", "Enable ALL mods", "Back"])
+        .default(0)
+        .interact()?;
+
+    match choice {
+        0 => {
+            let confirm = Confirm::with_theme(&theme())
+                .with_prompt(format!("Disable ALL mods in '{}'? (renames .jar → .jar.disabled)", instance_name))
+                .default(false)
+                .interact()?;
+            if confirm {
+                match instance_mgr.disable_all_mods(instance_name).await {
+                    Ok(n) => println!("  {} Disabled {} mod(s).", style("✓").green(), n),
+                    Err(e) => println!("  {} {}", style("✗").red(), e),
+                }
+            }
+        }
+        1 => {
+            match instance_mgr.enable_all_mods(instance_name).await {
+                Ok(n) => println!("  {} Enabled {} mod(s).", style("✓").green(), n),
+                Err(e) => println!("  {} {}", style("✗").red(), e),
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+// ── Changelog Viewer ──────────────────────────────────────────────────────────
+
+async fn changelog_viewer_menu(
+    http: &reqwest::Client,
+    version_mgr: &VersionManager,
+) -> Result<()> {
+    let installed = version_mgr.list_installed().await?;
+    if installed.is_empty() {
+        println!("  No versions installed.");
+        return Ok(());
+    }
+
+    let labels: Vec<String> = installed.iter()
+        .map(|v| format!("{} [{}]", v.id, v.version_type))
+        .collect();
+    let i = Select::with_theme(&theme())
+        .with_prompt("View changelog for")
+        .items(&labels)
+        .default(0)
+        .interact()?;
+    let version_id = &installed[i].id;
+
+    println!("  {} Fetching changelog for {}...", style("→").cyan(), version_id);
+    let entries = changelogviewer::find_entries(http, version_id).await;
+    match entries {
+        Err(e) => { println!("  {} {}", style("✗").red(), e); return Ok(()); }
+        Ok(ref v) if v.is_empty() => {
+            println!("  No changelog found for '{}'.", version_id);
+            return Ok(());
+        }
+        Ok(ref v) => {
+            // Show the first (most recent) matching entry.
+            let entry = &v[0];
+            println!();
+            println!("  {} {} — {}", style("◆").cyan(), style(&entry.version).cyan().bold(), entry.date.get(..10).unwrap_or(&entry.date));
+            if !entry.title.is_empty() {
+                println!("  {}", style(&entry.title).bold());
+            }
+            println!();
+            match changelogviewer::fetch_body(http, entry).await {
+                Ok(body) => {
+                    for line in body.lines().take(60) {
+                        println!("  {}", line);
+                    }
+                    if body.lines().count() > 60 {
+                        println!("  {} (truncated — open launchercontent.mojang.com for full notes)", style("…").dim());
+                    }
+                }
+                Err(e) => println!("  {} Could not fetch full body: {}", style("⚠").yellow(), e),
+            }
+        }
+    }
+    Ok(())
+}
+
+// ── Mod Dependency Graph ──────────────────────────────────────────────────────
+
+async fn dep_graph_menu(
+    http: &reqwest::Client,
+    instance_mgr: &InstanceManager,
+    version_mgr: &VersionManager,
+    game_dir: &PathBuf,
+) -> Result<()> {
+    let instances = instance_mgr.load_all().await?;
+
+    let mods_dir = if instances.is_empty() {
+        game_dir.join("mods")
+    } else {
+        let mut labels: Vec<String> = vec!["Default game dir".into()];
+        labels.extend(instances.iter().map(|i| format!("{} [{}]", i.name, i.version_id)));
+        let i = Select::with_theme(&theme())
+            .with_prompt("Build dependency graph for")
+            .items(&labels)
+            .default(0)
+            .interact()?;
+        if i == 0 { game_dir.join("mods") }
+        else { instance_mgr.instance_dir(&instances[i - 1].name).join("mods") }
+    };
+
+    // Pick game version for Modrinth lookups.
+    let installed = version_mgr.list_installed().await?;
+    let game_version = if installed.is_empty() {
+        "1.21".to_string()
+    } else {
+        let v_labels: Vec<String> = installed.iter().map(|v| v.id.clone()).collect();
+        let vi = Select::with_theme(&theme())
+            .with_prompt("Game version (for Modrinth lookup)")
+            .items(&v_labels)
+            .default(0)
+            .interact()?;
+        installed[vi].id.clone()
+    };
+
+    println!("  {} Building dependency graph (may take a moment)...", style("→").cyan());
+    match depgraph::build(http, &mods_dir, &game_version).await {
+        Ok(nodes) if nodes.is_empty() => println!("  No mods found in directory."),
+        Ok(nodes) => {
+            println!();
+            println!(
+                "  {} Dependency Graph  {} = required  {} = optional",
+                style("◆").cyan(),
+                style("●").green(),
+                style("○").yellow()
+            );
+            println!();
+            depgraph::print_tree(&nodes);
+        }
+        Err(e) => println!("  {} {}", style("✗").red(), e),
+    }
     Ok(())
 }

@@ -35,6 +35,29 @@ jobs:
       - name: Build
         run: cargo build --release --target x86_64-pc-windows-msvc
 
+      - name: Sign Windows executable
+        # Only runs when the signing certificate secret is present.
+        # Store the PFX file as a base64 secret: WINDOWS_SIGNING_CERT
+        # and the password as: WINDOWS_SIGNING_CERT_PASSWORD
+        if: ${{ secrets.WINDOWS_SIGNING_CERT != '' }}
+        shell: pwsh
+        run: |
+          $certBytes = [Convert]::FromBase64String("${{ secrets.WINDOWS_SIGNING_CERT }}")
+          $certPath  = "$env:RUNNER_TEMP\sumerian-sign.pfx"
+          [IO.File]::WriteAllBytes($certPath, $certBytes)
+          $signtool  = (Get-ChildItem -Path "C:\Program Files (x86)\Windows Kits" `
+                          -Filter "signtool.exe" -Recurse -ErrorAction SilentlyContinue |
+                          Select-Object -First 1).FullName
+          if (-not $signtool) { Write-Error "signtool.exe not found"; exit 1 }
+          & $signtool sign `
+            /fd SHA256 `
+            /tr http://timestamp.digicert.com `
+            /td SHA256 `
+            /f $certPath `
+            /p "${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD }}" `
+            "target\x86_64-pc-windows-msvc\release\sumerian.exe"
+          Remove-Item $certPath -Force
+
       - name: Rename exe
         run: cp target/x86_64-pc-windows-msvc/release/sumerian.exe sumerian-windows-x64.exe
 
@@ -581,6 +604,106 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
 
   # ---------------------------------------------------------------------
+  # RELEASE NOTES — runs git-cliff against the tag to generate a
+  # structured changelog from conventional commits and updates the
+  # GitHub release body automatically.
+  # ---------------------------------------------------------------------
+  release-notes:
+    needs:
+      - build-windows-x64
+      - build-windows-arm64
+      - build-linux-x64
+      - build-linux-arm64
+      - build-linux-flatpak
+      - build-macos-intel
+      - build-macos-arm
+      - build-macos-universal
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history required by git-cliff
+
+      - name: Install git-cliff
+        uses: kenji-miyake/setup-git-cliff@v2
+
+      - name: Generate release notes
+        id: cliff
+        run: |
+          git-cliff --config cliff.toml --latest --strip header \
+            --output RELEASE_NOTES.md
+          echo "body<<EOF" >> "$GITHUB_OUTPUT"
+          cat RELEASE_NOTES.md >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Update release body
+        uses: softprops/action-gh-release@v2
+        with:
+          body: ${{ steps.cliff.outputs.body }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+
+  # ---------------------------------------------------------------------
+  # SIGNED ARTIFACTS — uses Sigstore cosign to sign every release asset
+  # and upload detached .sig files so users can verify provenance without
+  # a private key (keyless OIDC signing via GitHub Actions).
+  # ---------------------------------------------------------------------
+  sign-artifacts:
+    needs:
+      - build-windows-x64
+      - build-windows-arm64
+      - build-linux-x64
+      - build-linux-arm64
+      - build-linux-flatpak
+      - build-macos-intel
+      - build-macos-arm
+      - build-macos-universal
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write   # required for keyless OIDC signing
+    steps:
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Install GitHub CLI
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gh
+
+      - name: Download all release assets
+        run: |
+          mkdir -p to-sign
+          gh release download "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --dir to-sign \
+            --skip-existing
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+
+      - name: Sign assets with cosign (keyless)
+        run: |
+          cd to-sign
+          for f in *; do
+            # Skip files we produced ourselves (.sig, .json, .txt)
+            [[ "$f" == *.sig  ]] && continue
+            [[ "$f" == *.json ]] && continue
+            [[ "$f" == *.txt  ]] && continue
+            echo "Signing $f ..."
+            cosign sign-blob --yes "$f" \
+              --bundle "${f}.cosign.bundle"
+          done
+
+      - name: Upload signatures
+        uses: softprops/action-gh-release@v2
+        with:
+          files: to-sign/*.cosign.bundle
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+
+  # ---------------------------------------------------------------------
   # CHECKSUMS — runs after every build job has uploaded its assets,
   # downloads everything from the release, hashes it, and uploads a
   # single SHA256SUMS.txt so users can verify their downloads.
@@ -595,6 +718,8 @@ jobs:
       - build-macos-intel
       - build-macos-arm
       - build-macos-universal
+      - release-notes
+      - sign-artifacts
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -642,6 +767,8 @@ jobs:
       - build-macos-intel
       - build-macos-arm
       - build-macos-universal
+      - release-notes
+      - sign-artifacts
     runs-on: ubuntu-latest
     permissions:
       contents: write

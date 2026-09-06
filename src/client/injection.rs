@@ -230,6 +230,9 @@ pub struct LaunchOptions<'a> {
     pub server: Option<&'a str>,
     pub port: Option<u16>,
     pub game_dir_override: Option<PathBuf>,
+    /// Optional wrapper binary prepended to the Java invocation
+    /// (e.g. `mangohud`, `gamescope`, `primusrun`).
+    pub launch_wrapper: Option<&'a str>,
 }
 
 pub struct GameLauncher {
@@ -341,6 +344,14 @@ impl GameLauncher {
         }
 
         let mut cmd = Command::new(&java_path);
+        // Prepend launch wrapper if specified (e.g. mangohud, gamescope).
+        let mut cmd = if let Some(wrapper) = opts.launch_wrapper.filter(|w| !w.is_empty()) {
+            let mut c = Command::new(wrapper);
+            c.arg(&java_path);
+            c
+        } else {
+            Command::new(&java_path)
+        };
         cmd.args(&jvm_args);
         cmd.arg("-cp").arg(&classpath);
         cmd.arg(&meta.main_class);

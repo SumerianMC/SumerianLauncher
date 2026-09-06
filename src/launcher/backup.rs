@@ -101,3 +101,82 @@ fn add_dir_to_zip(
     }
     Ok(())
 }
+
+// ── Scheduled backup ──────────────────────────────────────────────────────────
+
+/// Tracker stored at `<data_dir>/scheduled_backup_state.json`.
+/// Records cumulative playtime since the last scheduled backup so we can
+/// fire when the threshold is crossed.
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ScheduledBackupState {
+    /// Seconds of playtime accumulated since the last scheduled backup.
+    pub secs_since_last_backup: u64,
+    /// RFC3339 timestamp of the last scheduled backup (informational).
+    #[serde(default)]
+    pub last_backup_at: Option<String>,
+}
+
+pub struct ScheduledBackupManager {
+    backups_dir: PathBuf,
+    state_path: PathBuf,
+}
+
+impl ScheduledBackupManager {
+    pub fn new(data_dir: &Path) -> Self {
+        Self {
+            backups_dir: data_dir.join("backups"),
+            state_path: data_dir.join("scheduled_backup_state.json"),
+        }
+    }
+
+    async fn load_state(&self) -> ScheduledBackupState {
+        match tokio::fs::read_to_string(&self.state_path).await {
+            Ok(raw) => serde_json::from_str(&raw).unwrap_or_default(),
+            Err(_) => ScheduledBackupState::default(),
+        }
+    }
+
+    async fn save_state(&self, state: &ScheduledBackupState) -> anyhow::Result<()> {
+        tokio::fs::write(
+            &self.state_path,
+            serde_json::to_string_pretty(state)?,
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Call after every session with the session's duration.
+    /// If cumulative playtime since last backup exceeds `threshold_hours`,
+    /// triggers a backup and resets the counter.
+    /// Returns the backup path if a backup was created.
+    pub async fn tick(
+        &self,
+        instance_name: &str,
+        game_dir: &Path,
+        session_secs: u64,
+        threshold_hours: u64,
+    ) -> anyhow::Result<Option<PathBuf>> {
+        if threshold_hours == 0 {
+            return Ok(None);
+        }
+
+        let mut state = self.load_state().await;
+        state.secs_since_last_backup = state.secs_since_last_backup.saturating_add(session_secs);
+
+        let threshold_secs = threshold_hours * 3600;
+        if state.secs_since_last_backup >= threshold_secs {
+            // Create a BackupManager and fire.
+            let bm = BackupManager { backups_dir: self.backups_dir.clone() };
+            let path = bm.create_backup(instance_name, game_dir).await?;
+            state.secs_since_last_backup = 0;
+            state.last_backup_at = Some(chrono::Utc::now().to_rfc3339());
+            self.save_state(&state).await?;
+            return Ok(Some(path));
+        }
+
+        self.save_state(&state).await?;
+        Ok(None)
+    }
+}

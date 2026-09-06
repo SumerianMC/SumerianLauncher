@@ -221,6 +221,50 @@ impl InstanceManager {
         self.save_mod_profile(instance, &mp).await
     }
 
+    /// Disable ALL enabled mods in an instance in one step.
+    pub async fn disable_all_mods(&self, instance: &str) -> Result<usize> {
+        let mods_dir = self.instance_dir(instance).join("mods");
+        let mut count = 0usize;
+        let mut rd = match fs::read_dir(&mods_dir).await {
+            Ok(r) => r,
+            Err(_) => return Ok(0),
+        };
+        let mut to_disable = Vec::new();
+        while let Ok(Some(entry)) = rd.next_entry().await {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.ends_with(".jar") {
+                to_disable.push(name);
+            }
+        }
+        for filename in to_disable {
+            self.disable_mod(instance, &filename).await?;
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    /// Enable ALL disabled mods in an instance in one step.
+    pub async fn enable_all_mods(&self, instance: &str) -> Result<usize> {
+        let mods_dir = self.instance_dir(instance).join("mods");
+        let mut count = 0usize;
+        let mut rd = match fs::read_dir(&mods_dir).await {
+            Ok(r) => r,
+            Err(_) => return Ok(0),
+        };
+        let mut to_enable = Vec::new();
+        while let Ok(Some(entry)) = rd.next_entry().await {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.ends_with(".jar.disabled") {
+                to_enable.push(name.trim_end_matches(".disabled").to_string());
+            }
+        }
+        for filename in to_enable {
+            self.enable_mod(instance, &filename).await?;
+            count += 1;
+        }
+        Ok(count)
+    }
+
     pub async fn export(&self, name: &str, dest_path: &PathBuf) -> Result<()> {
         let inst_dir = self.instance_dir(name);
         if !inst_dir.exists() {
