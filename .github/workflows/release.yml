@@ -13,7 +13,7 @@ jobs:
     outputs:
       upload_url: ${{ steps.create.outputs.upload_url }}
     steps:
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         id: create
         env:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
@@ -97,7 +97,7 @@ jobs:
           makensis installer.nsi
 
       - name: Upload
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             sumerian-windows-x64.exe
@@ -156,7 +156,7 @@ jobs:
           makensis installer.nsi
 
       - name: Upload
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             sumerian-windows-arm64.exe
@@ -247,7 +247,7 @@ jobs:
           ARCH=x86_64 ./appimagetool --appimage-extract-and-run AppDir sumerian-linux-x64.AppImage
 
       - name: Upload
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             sumerian-linux-x64
@@ -371,7 +371,7 @@ jobs:
           ARCH=aarch64 ./appimagetool --appimage-extract-and-run AppDir sumerian-linux-arm64.AppImage
 
       - name: Upload
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             sumerian-linux-arm64
@@ -440,7 +440,7 @@ jobs:
           flatpak build-bundle repo ../sumerian-linux-x64.flatpak com.sumerianmc.sumerian
 
       - name: Upload
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: sumerian-linux-x64.flatpak
         env:
@@ -487,7 +487,7 @@ jobs:
           hdiutil create -volname Sumerian -srcfolder Sumerian-intel.app -ov -format UDZO sumerian-macos-intel.dmg
 
       - name: Upload
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             sumerian-macos-intel
@@ -536,7 +536,7 @@ jobs:
           hdiutil create -volname Sumerian -srcfolder Sumerian-arm64.app -ov -format UDZO sumerian-macos-arm64.dmg
 
       - name: Upload
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             sumerian-macos-arm64
@@ -595,7 +595,7 @@ jobs:
           hdiutil create -volname Sumerian -srcfolder Sumerian.app -ov -format UDZO sumerian-macos-universal.dmg
 
       - name: Upload
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             sumerian-macos-universal
@@ -639,7 +639,7 @@ jobs:
           echo "EOF" >> "$GITHUB_OUTPUT"
 
       - name: Update release body
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           body: ${{ steps.cliff.outputs.body }}
         env:
@@ -697,7 +697,7 @@ jobs:
           done
 
       - name: Upload signatures
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: to-sign/*.cosign.bundle
         env:
@@ -746,7 +746,7 @@ jobs:
           cat SHA256SUMS.txt
 
       - name: Upload checksums
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: release-assets/SHA256SUMS.txt
         env:
@@ -802,7 +802,7 @@ jobs:
             mv sumerian-sbom*.cdx.json sumerian-sbom.cdx.json
 
       - name: Upload SBOM
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: sumerian-sbom.cdx.json
         env:
